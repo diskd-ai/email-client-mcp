@@ -69,7 +69,9 @@ const main = async (): Promise<void> => {
   log("sdk ready", { workspaceId: diskd.value.workspaceId });
   const driveStore = buildDriveStore(diskd.value.messagesStore);
 
-  const pool = buildImapPool(cfg.value.accounts);
+  const pool = buildImapPool(cfg.value.accounts, {
+    onEvent: (event) => log("imap.pool-event", event),
+  });
 
   const syncDeps: SyncDeps = {
     drive: driveStore as unknown as SyncDeps["drive"],

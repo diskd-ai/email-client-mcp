@@ -84,6 +84,13 @@ export const buildWatcher = (
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
 
+  const runTick = (): void => {
+    void tick().catch((cause) => {
+      const msg = (cause as Error)?.message ?? String(cause);
+      log("watcher.tick-unhandled", { error: msg });
+    });
+  };
+
   const runForAccount = async (acct: Account): Promise<SyncReport> => {
     const existing = inFlight.get(acct.name);
     if (existing !== undefined) {
@@ -145,9 +152,9 @@ export const buildWatcher = (
     }
     log("watcher.start", { intervalMs, accounts: accounts.map((a) => a.name) });
     // Fire one tick immediately on boot so first sync does not wait a full interval.
-    void tick();
+    runTick();
     timer = setInterval(() => {
-      void tick();
+      runTick();
     }, intervalMs);
   };
 
