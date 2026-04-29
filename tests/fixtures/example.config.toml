@@ -1,0 +1,27 @@
+# Example email-client-mcp config. Smoke test points at this file via
+# EMAIL_CLIENT_MCP_CONFIG=tests/fixtures/example.config.toml. The server
+# starts the watcher disabled so it never tries to reach the (fake)
+# host or a real Drive. Tools that hit IMAP will fail at call time --
+# fine for the handshake/list_accounts/tools/list smoke check.
+
+[sdk]
+api_key = "smoke-key"
+base_url = "http://localhost:0"
+workspace_id = "ws-smoke"
+
+[watcher]
+enabled = false
+interval_ms = 60000
+flag_reconcile_window = 0
+
+[[accounts]]
+name = "smoke-account"
+email = "smoke@example.invalid"
+full_name = "Smoke Test"
+password = "smoke"
+
+[accounts.imap]
+host = "imap.example.invalid"
+port = 993
+tls = true
+verify_ssl = false
