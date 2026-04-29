@@ -43,8 +43,7 @@ export const buildDiskd = (
   envWorkspaceId: string | undefined,
 ): Result<ConfigError, DiskdRuntime> => {
   // workspaceId: TOML > APIS_WORKSPACE_ID > MCP_HUB_WORKSPACE_ID.
-  const workspaceId =
-    sdkSettings?.workspace_id ?? readEnv("APIS_WORKSPACE_ID") ?? envWorkspaceId;
+  const workspaceId = sdkSettings?.workspace_id ?? readEnv("APIS_WORKSPACE_ID") ?? envWorkspaceId;
   if (workspaceId === undefined || workspaceId.length === 0) {
     return Err(
       configError(
