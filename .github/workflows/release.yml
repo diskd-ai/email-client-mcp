@@ -98,7 +98,7 @@ jobs:
       # ---- publish ----
       - name: Confirm package.json version matches the tag
         run: |
-          PKG_VERSION="$(node -p 'require(\"./package.json\").version')"
+          PKG_VERSION="$(node -p 'require("./package.json").version')"
           if [ "$PKG_VERSION" != "$RELEASE_VERSION" ]; then
             echo "package.json version ($PKG_VERSION) != release version ($RELEASE_VERSION)" >&2
             exit 1
