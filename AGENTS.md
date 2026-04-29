@@ -26,7 +26,7 @@ Address: `end:comm/email-client-mcp`. Drive-backed email MCP server with reliabl
 src/
   server.ts           # stdio entry
   config/             # TOML schema + loader
-  sdk/                # @diskd/sdk wrapper
+  sdk/                # @diskd-ai/sdk wrapper
   imap/               # imapflow pool + pure mapper + virtual-folder allowlist
   store/              # drive messagesStore wrapper, conventions, payload type
   sync/               # runSyncOnce + watcher + backoff (the core)

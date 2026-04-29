@@ -8,7 +8,7 @@
  * do not need to track creation state.
  */
 
-import type { diskd as DiskdNs } from "@diskd/sdk";
+import type { diskd as DiskdNs } from "@diskd-ai/sdk";
 import { type DriveError, driveError } from "../domain/errors.js";
 import { Err, Ok, type Result } from "../domain/result.js";
 import { isValidMailboxId } from "./conventions.js";

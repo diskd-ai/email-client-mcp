@@ -1,5 +1,5 @@
 /**
- * Build the @diskd/sdk client used by the drive-backed messages store.
+ * Build the @diskd-ai/sdk client used by the drive-backed messages store.
  *
  * SDK constraint observed in 5.1.x: `APIS_API_KEY` and `APIS_BASE_URL`
  * are read from `process.env` only -- there is no constructor param.
@@ -11,7 +11,7 @@
  * k8s-gateway specs) so deployments don't have to encode workspaceId twice.
  */
 
-import { diskd } from "@diskd/sdk";
+import { diskd } from "@diskd-ai/sdk";
 import type { SdkSettings } from "../config/schema.js";
 import { type ConfigError, configError } from "../domain/errors.js";
 import { Err, Ok, type Result } from "../domain/result.js";

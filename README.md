@@ -1,6 +1,6 @@
 # Email Client MCP
 
-Multi-account email MCP server with reliable IMAP-to-mailboxes sync into a Drive-backed `messagesStore` (`@diskd/sdk`). Read tools hit IMAP live; the watcher mirrors every configured account into the workspace store on an interval (>= 60s).
+Multi-account email MCP server with reliable IMAP-to-mailboxes sync into a Drive-backed `messagesStore` (`@diskd-ai/sdk`). Read tools hit IMAP live; the watcher mirrors every configured account into the workspace store on an interval (>= 60s).
 
 Address: `end:comm/email-client-mcp`.
 
@@ -114,12 +114,11 @@ Auto-publish via `.github/workflows/release.yml`:
 
 Both paths run `bun install --frozen-lockfile`, `bun run typecheck`, `bun run lint`, `bun run test`, and `bun run build` before publishing, with provenance attestation enabled.
 
-Required repo secrets:
+Required repo secret:
 
 | Secret | Purpose |
 | --- | --- |
 | `NPM_TOKEN` | npmjs.com granular token, scope `@diskd-ai/*`, **Bypass 2FA** enabled. |
-| `GITLAB_NPM_TOKEN` | GitLab npm registry token to resolve the private `@diskd/sdk` dependency at install time. |
 
 ## License
 

@@ -5,7 +5,7 @@
  * Responsibilities:
  *  1. Parse CLI args (default subcommand: stdio).
  *  2. Load + validate the TOML config.
- *  3. Build @diskd/sdk client and Drive store.
+ *  3. Build @diskd-ai/sdk client and Drive store.
  *  4. Build IMAP pool + sync deps.
  *  5. Register MCP tools, attach stdio transport.
  *  6. Start the watcher AFTER the MCP `initialized` notification so we

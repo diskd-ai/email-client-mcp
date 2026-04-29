@@ -6,11 +6,9 @@ name: Release
 #     and pick a bump type (patch / minor / major). The job bumps the
 #     version in package.json, commits, tags, pushes, then publishes.
 #
-# Required repo secrets:
-#  - NPM_TOKEN          — npmjs.com granular token with publish + bypass-2FA
-#                         for the @diskd-ai scope.
-#  - GITLAB_NPM_TOKEN   — GitLab npm registry token used to resolve
-#                         the private @diskd/sdk dependency at install time.
+# Required repo secret:
+#  - NPM_TOKEN — npmjs.com granular token with publish + bypass-2FA
+#                for the @diskd-ai scope.
 
 on:
   push:
@@ -60,26 +58,8 @@ jobs:
         with:
           bun-version: '1.2.23'
 
-      - name: Configure .npmrc (overwrite repo .npmrc for CI)
-        # Repo .npmrc points only at GitLab for @diskd/*. In CI we ALSO need
-        # npmjs auth for the publish step, so we rewrite the file with both
-        # tokens. Restricted to the runner FS; not pushed back.
-        run: |
-          cat > .npmrc <<'EOF'
-          @diskd:registry=https://gitlab.iosya.com/api/v4/projects/80/packages/npm/
-          //gitlab.iosya.com/api/v4/projects/80/packages/npm/:_authToken=${GITLAB_NPM_TOKEN}
-          //registry.npmjs.org/:_authToken=${NPM_TOKEN}
-          always-auth=true
-          EOF
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          GITLAB_NPM_TOKEN: ${{ secrets.GITLAB_NPM_TOKEN }}
-
       - name: Install dependencies
         run: bun install --frozen-lockfile
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          GITLAB_NPM_TOKEN: ${{ secrets.GITLAB_NPM_TOKEN }}
 
       - name: Typecheck
         run: bun run typecheck
@@ -128,11 +108,8 @@ jobs:
         run: npm publish --provenance --access=public
         env:
           # NODE_AUTH_TOKEN is what `actions/setup-node` configures the
-          # generated ~/.npmrc to read for registry.npmjs.org. We override
-          # the repo .npmrc above; both paths use the same token.
+          # generated ~/.npmrc to read for registry.npmjs.org.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          GITLAB_NPM_TOKEN: ${{ secrets.GITLAB_NPM_TOKEN }}
 
       - name: Summary
         run: |
