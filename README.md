@@ -105,6 +105,22 @@ bun run dev           # tsx src/server.ts stdio (live reload)
 node scripts/smoke.mjs
 ```
 
+## Releasing
+
+Auto-publish via `.github/workflows/release.yml`:
+
+- **Tag-driven** (preferred): `npm version patch && git push --follow-tags` from main; the `v*.*.*` tag triggers the workflow which typechecks, lints, tests, builds, and `npm publish`es.
+- **One-click**: in the GitHub Actions UI run the *Release* workflow with `bump = patch | minor | major`. The job bumps `package.json`, commits, tags, pushes, and publishes -- all in one job.
+
+Both paths run `bun install --frozen-lockfile`, `bun run typecheck`, `bun run lint`, `bun run test`, and `bun run build` before publishing, with provenance attestation enabled.
+
+Required repo secrets:
+
+| Secret | Purpose |
+| --- | --- |
+| `NPM_TOKEN` | npmjs.com granular token, scope `@diskd-ai/*`, **Bypass 2FA** enabled. |
+| `GITLAB_NPM_TOKEN` | GitLab npm registry token to resolve the private `@diskd/sdk` dependency at install time. |
+
 ## License
 
 LGPL-3.0-or-later. See `LICENSE`.

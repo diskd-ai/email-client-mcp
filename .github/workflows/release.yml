@@ -1,0 +1,141 @@
+name: Release
+
+# Two ways to publish:
+#  1. Push a tag matching v*.*.* (e.g. `git tag v0.1.1 && git push --tags`).
+#  2. Run this workflow manually via the GitHub Actions UI ("Run workflow")
+#     and pick a bump type (patch / minor / major). The job bumps the
+#     version in package.json, commits, tags, pushes, then publishes.
+#
+# Required repo secrets:
+#  - NPM_TOKEN          — npmjs.com granular token with publish + bypass-2FA
+#                         for the @diskd-ai scope.
+#  - GITLAB_NPM_TOKEN   — GitLab npm registry token used to resolve
+#                         the private @diskd/sdk dependency at install time.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump (patch / minor / major) before publish'
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write    # needed for the bump-and-tag commit on workflow_dispatch
+  id-token: write    # required by npm provenance attestation
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need full history + tags so `npm version` can detect existing tags.
+          fetch-depth: 0
+          # On workflow_dispatch we'll commit+tag+push back, so use a token
+          # with write access (GITHUB_TOKEN with the contents:write permission
+          # above is sufficient).
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          # Authenticate npm CLI against npmjs for the publish step.
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@diskd-ai'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.23'
+
+      - name: Configure .npmrc (overwrite repo .npmrc for CI)
+        # Repo .npmrc points only at GitLab for @diskd/*. In CI we ALSO need
+        # npmjs auth for the publish step, so we rewrite the file with both
+        # tokens. Restricted to the runner FS; not pushed back.
+        run: |
+          cat > .npmrc <<'EOF'
+          @diskd:registry=https://gitlab.iosya.com/api/v4/projects/80/packages/npm/
+          //gitlab.iosya.com/api/v4/projects/80/packages/npm/:_authToken=${GITLAB_NPM_TOKEN}
+          //registry.npmjs.org/:_authToken=${NPM_TOKEN}
+          always-auth=true
+          EOF
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITLAB_NPM_TOKEN: ${{ secrets.GITLAB_NPM_TOKEN }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITLAB_NPM_TOKEN: ${{ secrets.GITLAB_NPM_TOKEN }}
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Unit tests
+        run: bun run test
+
+      - name: Build
+        run: bun run build
+
+      # ---- workflow_dispatch path: bump version + tag + push ----
+      - name: Bump version + tag + push (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # `npm version` updates package.json AND creates a v$VERSION tag.
+          NEW_VERSION="$(npm version "${{ inputs.bump }}" --no-git-tag-version)"
+          echo "Bumped to $NEW_VERSION"
+          git add package.json
+          git commit -m "release: $NEW_VERSION"
+          git tag "$NEW_VERSION"
+          git push origin HEAD --tags
+          echo "RELEASE_VERSION=${NEW_VERSION#v}" >> "$GITHUB_ENV"
+
+      - name: Read version from tag (push-tag path)
+        if: github.event_name == 'push'
+        run: |
+          REF="${GITHUB_REF#refs/tags/v}"
+          echo "RELEASE_VERSION=$REF" >> "$GITHUB_ENV"
+
+      # ---- publish ----
+      - name: Confirm package.json version matches the tag
+        run: |
+          PKG_VERSION="$(node -p 'require(\"./package.json\").version')"
+          if [ "$PKG_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "package.json version ($PKG_VERSION) != release version ($RELEASE_VERSION)" >&2
+            exit 1
+          fi
+
+      - name: npm publish (provenance enabled)
+        run: npm publish --provenance --access=public
+        env:
+          # NODE_AUTH_TOKEN is what `actions/setup-node` configures the
+          # generated ~/.npmrc to read for registry.npmjs.org. We override
+          # the repo .npmrc above; both paths use the same token.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITLAB_NPM_TOKEN: ${{ secrets.GITLAB_NPM_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "### Published @diskd-ai/email-client-mcp@${RELEASE_VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://www.npmjs.com/package/@diskd-ai/email-client-mcp/v/${RELEASE_VERSION}" >> "$GITHUB_STEP_SUMMARY"
