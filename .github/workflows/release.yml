@@ -73,6 +73,11 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: Verify npm auth before release mutation
+        run: npm whoami --registry=https://registry.npmjs.org/
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       # ---- workflow_dispatch path: bump version + tag + push ----
       - name: Bump version + tag + push (workflow_dispatch)
         if: github.event_name == 'workflow_dispatch'
