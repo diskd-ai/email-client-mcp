@@ -11,17 +11,15 @@
  *  - Every `ImapFlow` client has an `error` listener. Socket timeouts
  *    evict only that account's client and throttle reconnect by 30s
  *    instead of becoming an unhandled process-level event.
- *  - OAuth refresh: imapflow accepts an `accessToken` for XOAUTH2;
- *    the pool keeps a per-account "fetcher" that swaps the access
- *    token in-place at reconnect time. The provider-side refresh is
- *    a follow-up (see SDK gap notes); for v1 the password path is
- *    fully wired and OAuth runs against a long-lived access token.
+ *  - OAuth refresh: Gmail/Microsoft refresh tokens are exchanged for
+ *    short-lived access tokens before ImapFlow receives XOAUTH2 auth.
  */
 
 import { ImapFlow } from "imapflow";
 import { type Account, isOAuthAccount } from "../config/schema.js";
 import { type ImapError, imapError } from "../domain/errors.js";
 import { Err, Ok, type Result } from "../domain/result.js";
+import { type OAuthTokenFetcher, refreshOAuthAccessToken } from "./oauth.js";
 
 const DEFAULT_RECONNECT_DELAY_MS = 30_000;
 
@@ -53,7 +51,8 @@ export type ImapPoolOptions = {
   readonly nowMs?: () => number;
   readonly sleep?: (delayMs: number) => Promise<void>;
   readonly onEvent?: (event: ImapPoolEvent) => void;
-  readonly createClient?: (account: Account) => ImapFlow;
+  readonly fetchOAuthToken?: OAuthTokenFetcher;
+  readonly createClient?: (account: Account, auth: ImapAuth) => ImapFlow;
 };
 
 export type ImapPool = {
@@ -62,17 +61,24 @@ export type ImapPool = {
   readonly accountIds: readonly string[];
 };
 
-const buildClient = (acct: Account): ImapFlow => {
+export type ImapAuth =
+  | {
+      readonly user: string;
+      readonly pass: string;
+    }
+  | {
+      readonly user: string;
+      readonly accessToken: string;
+    };
+
+const buildClient = (acct: Account, auth: ImapAuth): ImapFlow => {
   if (isOAuthAccount(acct)) {
     return new ImapFlow({
       host: acct.imap.host,
       port: acct.imap.port,
       secure: acct.imap.tls,
       tls: { rejectUnauthorized: acct.imap.verify_ssl },
-      auth: {
-        user: acct.email,
-        accessToken: acct.oauth2.refresh_token,
-      },
+      auth,
       logger: false,
     });
   }
@@ -81,10 +87,7 @@ const buildClient = (acct: Account): ImapFlow => {
     port: acct.imap.port,
     secure: acct.imap.tls,
     tls: { rejectUnauthorized: acct.imap.verify_ssl },
-    auth: {
-      user: acct.username ?? acct.email,
-      pass: acct.password,
-    },
+    auth,
     logger: false,
   });
 };
@@ -95,6 +98,19 @@ const toErrorMessage = (cause: unknown): string =>
 const defaultSleep = (delayMs: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, delayMs));
 
+const resolveAuth = async (
+  acct: Account,
+  fetchOAuthToken: OAuthTokenFetcher,
+): Promise<Result<ImapError, ImapAuth>> => {
+  if (!isOAuthAccount(acct)) {
+    return Ok({ user: acct.username ?? acct.email, pass: acct.password });
+  }
+
+  const token = await fetchOAuthToken(acct);
+  if (token.tag === "Err") return token;
+  return Ok({ user: acct.username ?? acct.email, accessToken: token.value });
+};
+
 export const buildImapPool = (
   accounts: readonly Account[],
   options: ImapPoolOptions = {},
@@ -103,6 +119,7 @@ export const buildImapPool = (
   const nowMs = options.nowMs ?? (() => Date.now());
   const sleep = options.sleep ?? defaultSleep;
   const createClient = options.createClient ?? buildClient;
+  const fetchOAuthToken = options.fetchOAuthToken ?? refreshOAuthAccessToken;
   const byId = new Map<string, Account>();
   for (const a of accounts) byId.set(a.name, a);
   const liveById = new Map<string, ImapFlow>();
@@ -173,7 +190,12 @@ export const buildImapPool = (
 
     const connectFresh = async (): Promise<Result<ImapError, ImapFlow>> => {
       await waitForReconnectWindow(accountId);
-      const client = createClient(acct);
+      const auth = await resolveAuth(acct, fetchOAuthToken);
+      if (auth.tag === "Err") {
+        delayReconnect(accountId);
+        return auth;
+      }
+      const client = createClient(acct, auth.value);
       attachLifecycleHandlers(accountId, client);
       try {
         await client.connect();

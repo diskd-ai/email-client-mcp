@@ -1,8 +1,8 @@
 import { EventEmitter } from "node:events";
 import type { ImapFlow } from "imapflow";
 import { describe, expect, it } from "vitest";
-import type { Account } from "../../src/config/schema.js";
-import { buildImapPool, type ImapPoolEvent } from "../../src/imap/pool.js";
+import type { Account, OAuthAccount } from "../../src/config/schema.js";
+import { buildImapPool, type ImapAuth, type ImapPoolEvent } from "../../src/imap/pool.js";
 
 const acct: Account = {
   name: "work",
@@ -10,6 +10,19 @@ const acct: Account = {
   full_name: "Work",
   password: "x",
   imap: { host: "imap.example.com", port: 993, tls: true, verify_ssl: false },
+};
+
+const oauthAcct: OAuthAccount = {
+  name: "gmail",
+  email: "gmail@example.com",
+  username: "imap-user@gmail.com",
+  oauth2: {
+    provider: "google",
+    client_id: "client-id",
+    client_secret: "client-secret",
+    refresh_token: "refresh-token",
+  },
+  imap: { host: "imap.gmail.com", port: 993, tls: true, verify_ssl: true },
 };
 
 class FakeImapClient extends EventEmitter {
@@ -110,5 +123,30 @@ describe("imap pool", () => {
     expect(waits).toEqual([30_000]);
     expect(clients[0]?.closeCalls).toBe(1);
     expect(clients[1]?.connectCalls).toBe(1);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/imap/pool -- OAuth IMAP auth exchanges refresh_token for accessToken before connecting */
+  it("uses a refreshed OAuth access token for IMAP XOAUTH2", async () => {
+    const clients: FakeImapClient[] = [];
+    const auths: ImapAuth[] = [];
+
+    const pool = buildImapPool([oauthAcct], {
+      fetchOAuthToken: async (account) => {
+        expect(account.oauth2.refresh_token).toBe("refresh-token");
+        return { tag: "Ok", value: "access-token" };
+      },
+      createClient: (_account, auth) => {
+        auths.push(auth);
+        const client = new FakeImapClient();
+        clients.push(client);
+        return asImapFlow(client);
+      },
+    });
+
+    const result = await pool.forAccount("gmail");
+
+    expect(result.tag).toBe("Ok");
+    expect(auths).toEqual([{ user: "imap-user@gmail.com", accessToken: "access-token" }]);
+    expect(clients[0]?.connectCalls).toBe(1);
   });
 });

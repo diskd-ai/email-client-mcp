@@ -36,6 +36,7 @@ const oauth2Schema = z.object({
 const oauthAccountSchema = z.object({
   name: z.string().min(1),
   email: z.string().min(1),
+  username: z.string().optional(),
   full_name: z.string().optional(),
   oauth2: oauth2Schema,
   imap: imapSchema,
