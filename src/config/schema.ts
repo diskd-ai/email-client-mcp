@@ -55,15 +55,21 @@ const watcherSchema = z.object({
   flag_reconcile_window: z.number().int().min(0).default(500),
 });
 
+/**
+ * Optional [sdk] block. The SDK's `APIS_API_KEY` / `APIS_BASE_URL` /
+ * `APIS_WORKSPACE_ID` come from the spawned-pod env (injected by
+ * mcp-hub k8s-gateway) on real deployments; the TOML overrides are
+ * only useful for local development or unusual setups.
+ */
 const sdkSchema = z.object({
-  api_key: z.string().min(1),
+  api_key: z.string().min(1).optional(),
   base_url: z.string().url().optional(),
   workspace_id: z.string().optional(),
 });
 
 export const configSchema = z.object({
   accounts: z.array(accountSchema).min(1),
-  sdk: sdkSchema,
+  sdk: sdkSchema.optional(),
   watcher: watcherSchema.default({
     enabled: true,
     interval_ms: 60_000,
