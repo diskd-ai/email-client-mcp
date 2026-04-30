@@ -3,13 +3,17 @@
  * read tools (`get_email`, `get_emails`, `list_emails`). All helpers are
  * BODY.PEEK by default so reads do not silently flip `\\Seen`.
  *
- * Body decoding strategy: we ask imapflow for `bodyParts` (the small
- * `text/plain` and `text/html` pieces) instead of full source -- this
- * keeps payloads bounded without requiring a separate MIME parser. The
- * mapper truncates body byte-size on top.
+ * Body decoding strategy: first fetch `BODYSTRUCTURE`, then request the
+ * concrete MIME part ids for `text/plain` and `text/html`. Never pass semantic
+ * names such as `html` to imapflow: some IMAP servers (OVH) reject
+ * `BODY.PEEK[HTML]` with `BAD Command Argument Error. 11`.
  */
 
-import type { FetchMessageObject, ImapFlow, MailboxLockObject } from "imapflow";
+import type {
+  FetchMessageObject,
+  ImapFlow,
+  MailboxLockObject,
+} from "imapflow";
 import type { FetchedMessageLike } from "./mapper.js";
 
 export type FolderStatusSnapshot = {
@@ -18,7 +22,66 @@ export type FolderStatusSnapshot = {
   readonly messages: number;
 };
 
-const BODY_PARTS = ["text", "html"] as const;
+type BodyPartCandidate = {
+  readonly textPartId: string | null;
+  readonly htmlPartId: string | null;
+};
+
+type BodyStructureNode = {
+  readonly type?: string | undefined;
+  readonly part?: string | undefined;
+  readonly disposition?: string | undefined;
+  readonly dispositionParameters?:
+    | { readonly filename?: string | undefined }
+    | undefined;
+  readonly parameters?: { readonly name?: string | undefined } | undefined;
+  readonly childNodes?: readonly BodyStructureNode[] | undefined;
+};
+
+const isAttachmentNode = (node: BodyStructureNode): boolean =>
+  node.disposition === "attachment" ||
+  (node.disposition === "inline" &&
+    Boolean(node.dispositionParameters?.filename ?? node.parameters?.name));
+
+const fallbackSinglePartId = (type: string | undefined): string | null => {
+  if (type === "text/plain" || type === "text/html") return "1";
+  return null;
+};
+
+/**
+ * Find concrete IMAP body part ids for display bodies.
+ * Attachments are skipped.
+ */
+export const findDisplayBodyPartIds = (
+  bodyStructure: unknown,
+): BodyPartCandidate => {
+  const result: { textPartId: string | null; htmlPartId: string | null } = {
+    textPartId: null,
+    htmlPartId: null,
+  };
+
+  const visit = (raw: unknown): void => {
+    if (result.textPartId && result.htmlPartId) return;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
+    const node = raw as BodyStructureNode;
+    if (isAttachmentNode(node)) return;
+
+    const type = node.type?.toLowerCase();
+    const partId = node.part ?? fallbackSinglePartId(type);
+    if (type === "text/plain" && partId && !result.textPartId) {
+      result.textPartId = partId;
+    } else if (type === "text/html" && partId && !result.htmlPartId) {
+      result.htmlPartId = partId;
+    }
+
+    for (const child of node.childNodes ?? []) {
+      visit(child);
+    }
+  };
+
+  visit(bodyStructure);
+  return result;
+};
 
 /**
  * Run a callback under a per-folder IMAP lock. imapflow requires this
@@ -60,14 +123,41 @@ const decodeBuffer = (b: Buffer | undefined | null): string | null => {
   return b.toString("utf8");
 };
 
-const extractText = (msg: FetchMessageObject): string | null => {
-  const candidate = msg.bodyParts?.get("text") ?? msg.bodyParts?.get("1");
-  return decodeBuffer(candidate as Buffer | undefined);
-};
+const fetchDisplayBodies = async (
+  client: ImapFlow,
+  uid: number,
+  bodyStructure: unknown,
+): Promise<{
+  readonly bodyText: string | null;
+  readonly bodyHtml: string | null;
+}> => {
+  const { textPartId, htmlPartId } = findDisplayBodyPartIds(bodyStructure);
+  const partIds = [
+    ...new Set(
+      [textPartId, htmlPartId].filter((id): id is string => id !== null),
+    ),
+  ];
+  if (partIds.length === 0) {
+    return { bodyText: null, bodyHtml: null };
+  }
 
-const extractHtml = (msg: FetchMessageObject): string | null => {
-  const candidate = msg.bodyParts?.get("html") ?? msg.bodyParts?.get("1.2");
-  return decodeBuffer(candidate as Buffer | undefined);
+  const bodyMsg = await client.fetchOne(
+    String(uid),
+    {
+      uid: true,
+      bodyParts: partIds,
+    },
+    { uid: true },
+  );
+
+  return {
+    bodyText: textPartId
+      ? decodeBuffer(bodyMsg?.bodyParts?.get(textPartId) as Buffer | undefined)
+      : null,
+    bodyHtml: htmlPartId
+      ? decodeBuffer(bodyMsg?.bodyParts?.get(htmlPartId) as Buffer | undefined)
+      : null,
+  };
 };
 
 export type FetchedEnvelopeBundle = {
@@ -95,7 +185,7 @@ const toLike = (msg: FetchMessageObject): FetchedMessageLike => ({
 
 /**
  * UID-range fetch for the watcher. Yields envelope + flags + bodyStructure
- * + bodyParts(text/html) without setting `\\Seen`.
+ * plus display body parts without setting `\\Seen`.
  */
 export async function* fetchUidRange(
   client: ImapFlow,
@@ -103,6 +193,7 @@ export async function* fetchUidRange(
   toUid: number,
 ): AsyncIterable<FetchedEnvelopeBundle> {
   const range = `${fromUid}:${toUid}`;
+  const messages: FetchMessageObject[] = [];
   for await (const msg of client.fetch(
     range,
     {
@@ -110,15 +201,19 @@ export async function* fetchUidRange(
       flags: true,
       envelope: true,
       bodyStructure: true,
-      bodyParts: BODY_PARTS as unknown as string[],
       internalDate: true,
     },
     { uid: true },
   )) {
+    messages.push(msg);
+  }
+
+  for (const msg of messages) {
+    const bodies = await fetchDisplayBodies(client, msg.uid, msg.bodyStructure);
     yield {
       imapMessage: toLike(msg),
-      bodyText: extractText(msg),
-      bodyHtml: extractHtml(msg),
+      bodyText: bodies.bodyText,
+      bodyHtml: bodies.bodyHtml,
     };
   }
 }
@@ -138,16 +233,16 @@ export const fetchOneByUid = async (
       flags: true,
       envelope: true,
       bodyStructure: true,
-      bodyParts: BODY_PARTS as unknown as string[],
       internalDate: true,
     },
     { uid: true },
   );
   if (!msg) return null;
+  const bodies = await fetchDisplayBodies(client, msg.uid, msg.bodyStructure);
   return {
     imapMessage: toLike(msg),
-    bodyText: extractText(msg),
-    bodyHtml: extractHtml(msg),
+    bodyText: bodies.bodyText,
+    bodyHtml: bodies.bodyHtml,
   };
 };
 
