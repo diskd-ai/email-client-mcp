@@ -9,11 +9,7 @@
  * `BODY.PEEK[HTML]` with `BAD Command Argument Error. 11`.
  */
 
-import type {
-  FetchMessageObject,
-  ImapFlow,
-  MailboxLockObject,
-} from "imapflow";
+import type { FetchMessageObject, ImapFlow, MailboxLockObject } from "imapflow";
 import type { FetchedMessageLike } from "./mapper.js";
 
 export type FolderStatusSnapshot = {
@@ -31,9 +27,7 @@ type BodyStructureNode = {
   readonly type?: string | undefined;
   readonly part?: string | undefined;
   readonly disposition?: string | undefined;
-  readonly dispositionParameters?:
-    | { readonly filename?: string | undefined }
-    | undefined;
+  readonly dispositionParameters?: { readonly filename?: string | undefined } | undefined;
   readonly parameters?: { readonly name?: string | undefined } | undefined;
   readonly childNodes?: readonly BodyStructureNode[] | undefined;
 };
@@ -52,9 +46,7 @@ const fallbackSinglePartId = (type: string | undefined): string | null => {
  * Find concrete IMAP body part ids for display bodies.
  * Attachments are skipped.
  */
-export const findDisplayBodyPartIds = (
-  bodyStructure: unknown,
-): BodyPartCandidate => {
+export const findDisplayBodyPartIds = (bodyStructure: unknown): BodyPartCandidate => {
   const result: { textPartId: string | null; htmlPartId: string | null } = {
     textPartId: null,
     htmlPartId: null,
@@ -132,11 +124,7 @@ const fetchDisplayBodies = async (
   readonly bodyHtml: string | null;
 }> => {
   const { textPartId, htmlPartId } = findDisplayBodyPartIds(bodyStructure);
-  const partIds = [
-    ...new Set(
-      [textPartId, htmlPartId].filter((id): id is string => id !== null),
-    ),
-  ];
+  const partIds = [...new Set([textPartId, htmlPartId].filter((id): id is string => id !== null))];
   if (partIds.length === 0) {
     return { bodyText: null, bodyHtml: null };
   }
@@ -153,12 +141,8 @@ const fetchDisplayBodies = async (
   const bodyParts = bodyMsg === false ? undefined : bodyMsg.bodyParts;
 
   return {
-    bodyText: textPartId
-      ? decodeBuffer(bodyParts?.get(textPartId) as Buffer | undefined)
-      : null,
-    bodyHtml: htmlPartId
-      ? decodeBuffer(bodyParts?.get(htmlPartId) as Buffer | undefined)
-      : null,
+    bodyText: textPartId ? decodeBuffer(bodyParts?.get(textPartId) as Buffer | undefined) : null,
+    bodyHtml: htmlPartId ? decodeBuffer(bodyParts?.get(htmlPartId) as Buffer | undefined) : null,
   };
 };
 
