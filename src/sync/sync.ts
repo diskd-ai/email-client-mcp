@@ -56,6 +56,11 @@ export type SyncDeps = {
       payloads: readonly StoredEmailPayload[],
       externalIds: readonly string[],
     ) => Promise<Result<AppError, { inserted: number; updated: number }>>;
+    readonly getMessage: (
+      mailboxId: string,
+      folderId: string,
+      externalId: string,
+    ) => Promise<Result<AppError, StoredEmailPayload | null>>;
   };
   readonly imap: {
     readonly listFolders: (
@@ -127,11 +132,17 @@ const range = (lo: number, hi: number): readonly [number, number][] => {
   return out;
 };
 
-const flagsAreEqual = (a: readonly string[], b: readonly string[]): boolean => {
-  if (a.length !== b.length) return false;
-  const sa = new Set(a);
-  for (const x of b) if (!sa.has(x)) return false;
-  return true;
+const mergeReconciledFlags = (
+  existing: StoredEmailPayload | null,
+  incoming: StoredEmailPayload,
+): StoredEmailPayload => {
+  if (existing === null) return incoming;
+  return {
+    ...existing,
+    flags: incoming.flags,
+    labels: incoming.labels,
+    fetchedAt: incoming.fetchedAt,
+  };
 };
 
 /**
@@ -367,17 +378,19 @@ const syncFolder = async (
           bodyHtml: null,
           truncated: false,
         });
-        // Always upsert -- the store is opaque, but flagsAreEqual would
-        // require a read-back. Bounded set keeps cost predictable.
-        // We keep the shape stable; bodyText/Html stay null in this mode
-        // but flags/labels reflect the latest IMAP state.
-        if (!flagsAreEqual(incoming.flags, [])) {
-          updated.push(incoming);
-          updatedIds.push(externalIdFor(status.uidValidity, env.uid));
-        } else {
-          updated.push(incoming);
-          updatedIds.push(externalIdFor(status.uidValidity, env.uid));
+        const externalId = externalIdFor(status.uidValidity, env.uid);
+        const existingPayload = await deps.drive.getMessage(mailboxId, folderId, externalId);
+        if (existingPayload.tag === "Err") {
+          return {
+            folderId,
+            newMessages,
+            reconciledFlags: 0,
+            uidValidityRolled,
+            error: errorMessage(existingPayload.error),
+          };
         }
+        updated.push(mergeReconciledFlags(existingPayload.value, incoming));
+        updatedIds.push(externalId);
       }
       if (updated.length > 0) {
         const ups = await deps.drive.upsertMessages(mailboxId, folderId, updated, updatedIds);

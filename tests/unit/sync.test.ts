@@ -3,7 +3,7 @@ import type { Account, WatcherSettings } from "../../src/config/schema.js";
 import type { AppError, ImapError } from "../../src/domain/errors.js";
 import { Err, Ok, type Result } from "../../src/domain/result.js";
 import type { FetchedMessageLike } from "../../src/imap/mapper.js";
-import type { SyncState } from "../../src/store/payloadTypes.js";
+import type { StoredEmailPayload, SyncState } from "../../src/store/payloadTypes.js";
 import { runSyncOnce, type SyncDeps } from "../../src/sync/sync.js";
 
 const acct: Account = {
@@ -34,7 +34,17 @@ type FakeImapState = {
 
 type FakeDriveState = {
   mailboxes: Map<string, { displayName: string }>;
-  folders: Map<string, Map<string, { metadata: Record<string, unknown>; messageIds: Set<string> }>>;
+  folders: Map<
+    string,
+    Map<
+      string,
+      {
+        metadata: Record<string, unknown>;
+        messageIds: Set<string>;
+        payloads: Map<string, StoredEmailPayload>;
+      }
+    >
+  >;
 };
 
 const buildFakeDeps = (
@@ -61,6 +71,7 @@ const buildFakeDeps = (
           m.set(folderId, {
             metadata: metadata as unknown as Record<string, unknown>,
             messageIds: new Set(),
+            payloads: new Map(),
           });
         } else {
           cur.metadata = metadata as unknown as Record<string, unknown>;
@@ -107,22 +118,28 @@ const buildFakeDeps = (
         if (m === undefined) return Err({ kind: "DriveError", message: "no mailbox" } as AppError);
         let f = m.get(folderId);
         if (f === undefined) {
-          f = { metadata: {}, messageIds: new Set() };
+          f = { metadata: {}, messageIds: new Set(), payloads: new Map() };
           m.set(folderId, f);
         }
         let inserted = 0;
         let updated = 0;
         for (let i = 0; i < externalIds.length; i++) {
           const id = externalIds[i] as string;
-          // payload is opaque; track it just for size assertions
-          void payloads[i];
           if (f.messageIds.has(id)) updated += 1;
           else {
             f.messageIds.add(id);
             inserted += 1;
           }
+          f.payloads.set(id, payloads[i] as StoredEmailPayload);
         }
         return Ok({ inserted, updated });
+      },
+      getMessage: async (mailboxId, folderId, externalId) => {
+        const m = drive.folders.get(mailboxId);
+        if (m === undefined) return Ok(null);
+        const f = m.get(folderId);
+        if (f === undefined) return Ok(null);
+        return Ok(f.payloads.get(externalId) ?? null);
       },
     },
     imap: {
@@ -270,6 +287,26 @@ describe("sync/runSyncOnce", () => {
     expect(rep.folders[0]?.newMessages).toBe(1); // only UID 4 fetched
     const stored = drive.folders.get("work")?.get("INBOX");
     expect(stored?.messageIds.size).toBe(4);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- flag reconciliation preserves body payload fields */
+  it("preserves fetched body when reconciling flags in the same tick", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 14, uidNext: 95, msgs: [mkMsg(94)] }]]),
+    };
+    const rep = await runSyncOnce(buildFakeDeps(imap, drive), acct, {
+      ...watcherDefault,
+      flag_reconcile_window: 100,
+    });
+
+    expect(rep.error).toBeNull();
+    expect(rep.folders[0]?.reconciledFlags).toBe(1);
+    const stored = drive.folders.get("work")?.get("INBOX")?.payloads.get("14:94");
+    expect(stored?.bodyText).toBe("body");
+    expect(stored?.bodyHtml).toBeNull();
+    expect(stored?.snippet).toBe("body");
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- folders deleted on IMAP are pruned from drive */

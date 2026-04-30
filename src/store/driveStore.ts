@@ -48,6 +48,11 @@ export type DriveStore = {
     payloads: readonly StoredEmailPayload[],
     externalIds: readonly string[],
   ) => Promise<Result<DriveError, { inserted: number; updated: number }>>;
+  readonly getMessage: (
+    mailboxId: string,
+    folderId: string,
+    externalId: string,
+  ) => Promise<Result<DriveError, StoredEmailPayload | null>>;
 };
 
 const wrap = async <T>(what: string, fn: () => Promise<T>): Promise<Result<DriveError, T>> => {
@@ -128,5 +133,17 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
     );
     if (r.tag === "Err") return r;
     return Ok({ inserted: r.value.inserted, updated: r.value.updated });
+  },
+  async getMessage(mailboxId, folderId, externalId) {
+    try {
+      const message = await folderScoped(store, mailboxId, folderId).getMessage({ externalId });
+      return Ok(message.payload as unknown as StoredEmailPayload);
+    } catch (cause) {
+      const msg = (cause as Error)?.message ?? String(cause);
+      if (/not found|MESSAGE_NOT_FOUND|404/i.test(msg)) {
+        return Ok(null);
+      }
+      return Err(driveError(`folder.getMessage failed: ${msg}`, cause));
+    }
   },
 });
