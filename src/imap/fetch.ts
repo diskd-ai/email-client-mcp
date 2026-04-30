@@ -150,12 +150,14 @@ const fetchDisplayBodies = async (
     { uid: true },
   );
 
+  const bodyParts = bodyMsg === false ? undefined : bodyMsg.bodyParts;
+
   return {
     bodyText: textPartId
-      ? decodeBuffer(bodyMsg?.bodyParts?.get(textPartId) as Buffer | undefined)
+      ? decodeBuffer(bodyParts?.get(textPartId) as Buffer | undefined)
       : null,
     bodyHtml: htmlPartId
-      ? decodeBuffer(bodyMsg?.bodyParts?.get(htmlPartId) as Buffer | undefined)
+      ? decodeBuffer(bodyParts?.get(htmlPartId) as Buffer | undefined)
       : null,
   };
 };
