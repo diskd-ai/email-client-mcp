@@ -317,6 +317,22 @@ const syncFolder = async (
             truncated: false,
           });
 
+          const initialUpsert = await deps.drive.upsertMessages(
+            mailboxId,
+            folderId,
+            [payload],
+            [externalId],
+          );
+          if (initialUpsert.tag === "Err") {
+            return await finishWithError(initialUpsert.error);
+          }
+
+          if (payload.attachments.length === 0) {
+            newMessages += initialUpsert.value.inserted + initialUpsert.value.updated;
+            lastSynced = uid;
+            continue;
+          }
+
           for (const rawAttachment of payload.attachments) {
             const attachment = withAttachmentId(rawAttachment, status.uidValidity, uid);
             const content = deps.imap.downloadPart(
@@ -338,11 +354,16 @@ const syncFolder = async (
             payload = patchAttachmentStorageRef(payload, attachment.attachmentId, uploaded.value);
           }
 
-          const ups = await deps.drive.upsertMessages(mailboxId, folderId, [payload], [externalId]);
-          if (ups.tag === "Err") {
-            return await finishWithError(ups.error);
+          const finalUpsert = await deps.drive.upsertMessages(
+            mailboxId,
+            folderId,
+            [payload],
+            [externalId],
+          );
+          if (finalUpsert.tag === "Err") {
+            return await finishWithError(finalUpsert.error);
           }
-          newMessages += ups.value.inserted + ups.value.updated;
+          newMessages += initialUpsert.value.inserted + initialUpsert.value.updated;
           lastSynced = uid;
         }
       } catch (cause) {

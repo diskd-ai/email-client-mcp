@@ -59,10 +59,11 @@ For every watcher tick:
 5. For each message:
    - fetches envelope, flags, body structure, text/html body parts;
    - maps body and attachment metadata into a message payload;
+   - upserts the initial message payload into `messagesStore` so Drive can resolve the message row for attachment ownership;
    - uploads each attachment stream from IMAP to Drive/messagesStore;
    - patches the message payload with attachment storage references;
-   - upserts the complete message payload into `messagesStore`.
-6. After each successful message, an in-memory `successfulUid` moves to that UID.
+   - upserts the final message payload into `messagesStore`.
+6. After the final payload upsert succeeds, an in-memory `successfulUid` moves to that UID.
 7. At the end of the batch, the folder checkpoint is written once with `lastSyncedUid = successfulUid`.
 8. If one message fails, the folder checkpoint is written once with the last successful UID before the failure, `lastSyncError` is recorded, and the tick stops for that folder.
 9. The next tick retries from `lastSyncedUid + 1`.
@@ -81,17 +82,21 @@ IMAP BODY.PEEK[partId] decoded stream
 
 The MCP server does not return attachment bytes through JSON-RPC and does not pass bytes through app-service. The server only stores attachment references in the message payload.
 
+The message row must exist before attachment upload starts: Drive stores a per-message `attachment_folder_inode` on the message row and attachment rows reference the internal message primary key. Therefore the sync flow first upserts the message payload with body + attachment metadata, but it does not advance the checkpoint until all attachment uploads and the final payload patch are durable.
+
 The upload lifecycle per attachment:
 
-1. Call messagesStore attachment `uploadStart` with stable `attachmentId`, filename, content type, and size.
-2. Call IMAP `download(uid, partId, { uid: true })` to get a readable stream.
-3. Stream that readable directly into the returned upload URL using HTTP `PUT` with:
+1. Ensure the message row exists via the initial message upsert.
+2. Call messagesStore attachment `uploadStart` with stable `attachmentId`, filename, content type, and size.
+3. Call IMAP `download(uid, partId, { uid: true })` to get a readable stream.
+4. Stream that readable directly into the returned upload URL using HTTP `PUT` with:
    - `X-Upload-Intent-Id: <intentId>`;
    - `Content-Length: <sizeBytes>`;
    - `Content-Type: <contentType>`.
-4. Read the upload response `etag`.
-5. Call messagesStore attachment `uploadCommit` with `attachmentId`, `intentId`, and `etag`.
-6. Patch the attachment entry in the message payload with `attachmentId`, `driveInode`, `storedSizeBytes`, and `storedAt`.
+5. Read the upload response `etag`.
+6. Call messagesStore attachment `uploadCommit` with `attachmentId`, `intentId`, and `etag`.
+7. Patch the attachment entry in the message payload with `attachmentId`, `driveInode`, `storedSizeBytes`, and `storedAt`.
+8. Final-upsert the patched message payload.
 
 The Drive-side contract treats duplicate `attachment_id` on the same message as `CONFLICT`. Retry logic should make this idempotent in `email-client-mcp`: list/get the existing stored attachment, accept it only when metadata matches the intended upload, and otherwise fail the UID rather than silently overwriting bytes.
 
@@ -168,9 +173,10 @@ Expected error categories:
 - checkpoint write failure.
 
 User-facing behavior:
-- A message is visible in Mailbox only after it is fully synced, including attachments.
+- A message row can appear in `messagesStore` after the initial upsert because Drive requires that row before attachment upload can start.
+- The folder checkpoint advances only after the final payload with attachment refs is durable.
 - No “pending attachment” UI state is introduced in v1.
-- If an attachment repeatedly fails, the message remains absent or stale until sync succeeds, and diagnostics are visible via `get_watcher_status`.
+- If an attachment repeatedly fails, the message may remain visible with metadata-only attachments and without storage refs, while diagnostics are visible via `get_watcher_status`.
 
 Update cadence / Lifecycle
 --------------------------
@@ -227,10 +233,11 @@ Phase 3: Drive/messagesStore attachment upload dependency
 Phase 4: per-message successful sync
 - Refactor new UID sync so each message is completed sequentially:
   - build payload;
+  - initial-upsert payload to create/refresh the Drive message row;
   - upload attachments;
   - patch payload refs;
-  - upsert complete message;
-  - update local `successfulUid`.
+  - final-upsert complete message;
+  - update local `successfulUid` only after the final upsert.
 - Flush checkpoint once per successful batch or once on failure.
 - Keep batch range fetching for IMAP efficiency, but do not depend on batch-level success for checkpoint correctness.
 
@@ -250,7 +257,9 @@ Unit tests:
     - Assert message payload is upserted with attachment `attachmentId` and `driveInode`.
     - Assert checkpoint advances to the message UID.
   - Case: attachment upload fails.
+    - Assert the initial message row may exist because Drive requires it before `uploadStart`.
     - Assert checkpoint remains at previous successful UID.
+    - Assert the failed payload has no attachment storage refs.
     - Assert `lastSyncError` is written.
     - Assert the failing UID is retried on next `runSyncOnce`.
   - Case: message 95 succeeds and message 96 attachment fails.
@@ -282,7 +291,7 @@ Integration-style unit tests with fakes:
 Acceptance criteria
 -------------------
 
-- Given a new IMAP message with one attachment, when watcher syncs the folder, then Mailbox list shows the message only after the attachment is stored in messagesStore.
+- Given a new IMAP message with one attachment, when watcher syncs the folder, then the message checkpoint advances only after the attachment is stored in messagesStore and the final payload includes storage refs.
 - Given that attachment upload succeeds, when app-service reads the message detail, then the opaque message payload attachment entry includes stable storage references (`attachmentId`, `driveInode`, `storedSizeBytes`, `storedAt`) populated by `email-client-mcp` after Drive `uploadCommit`.
 - Given attachment upload fails for UID N, when sync finishes, then folder metadata has `lastSyncedUid < N` and `lastSyncError` is non-null.
 - Given the next tick runs after that failure, then UID N is retried.

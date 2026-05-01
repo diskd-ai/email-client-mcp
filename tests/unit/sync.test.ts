@@ -154,6 +154,14 @@ const buildFakeDeps = (
         return Ok(f.payloads.get(externalId) ?? null);
       },
       uploadAttachment: async (mailboxId, folderId, externalId, attachment, content) => {
+        const mailbox = drive.folders.get(mailboxId);
+        const folder = mailbox?.get(folderId);
+        if (!folder?.payloads.has(externalId)) {
+          return Err({
+            kind: "DriveError",
+            message: `message not found: ${externalId}`,
+          } as AppError);
+        }
         if (options?.uploadAttachmentError?.attachmentId === attachment.attachmentId) {
           return Err({
             kind: "DriveError",
@@ -345,7 +353,10 @@ describe("sync/runSyncOnce", () => {
     const stored = drive.folders.get("work")?.get("INBOX");
     expect(stored?.messageIds.has("14:94")).toBe(true);
     expect(stored?.messageIds.has("14:95")).toBe(true);
-    expect(stored?.messageIds.has("14:96")).toBe(false);
+    // Drive requires the message row before attachment upload-start, so the
+    // failed UID can have a pre-ref payload row, but it must not be checkpointed.
+    expect(stored?.messageIds.has("14:96")).toBe(true);
+    expect(stored?.payloads.get("14:96")?.attachments[0]?.driveInode).toBeUndefined();
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(95);
     expect((stored?.metadata as unknown as SyncState).lastSyncError).toContain("upload failed");
   });
