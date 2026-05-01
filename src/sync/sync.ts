@@ -351,15 +351,20 @@ const syncFolder = async (
               sizeBytes: downloaded.sizeBytes ?? attachment.sizeBytes,
               contentType: downloaded.contentType ?? attachment.contentType,
             };
-            const uploaded = await deps.drive.uploadAttachment(
-              mailboxId,
-              folderId,
-              externalId,
-              uploadAttachment,
-              downloaded.content,
-            );
+            const uploaded = await (async () => {
+              try {
+                return await deps.drive.uploadAttachment(
+                  mailboxId,
+                  folderId,
+                  externalId,
+                  uploadAttachment,
+                  downloaded.content,
+                );
+              } finally {
+                downloaded.dispose();
+              }
+            })();
             if (uploaded.tag === "Err") {
-              downloaded.dispose();
               return await finishWithError(uploaded.error);
             }
             payload = patchAttachmentStorageRef(payload, attachment.attachmentId, uploaded.value);

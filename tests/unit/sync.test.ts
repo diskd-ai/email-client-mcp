@@ -64,6 +64,8 @@ const buildFakeDeps = (
       readonly sizeBytes: number;
       readonly chunks: readonly string[];
     }>;
+    readonly uploadAttachmentSkipsContent?: boolean;
+    readonly downloadDisposeCalls?: string[];
     readonly clock?: () => Date;
   },
 ): SyncDeps => {
@@ -169,8 +171,10 @@ const buildFakeDeps = (
           } as AppError);
         }
         const chunks: string[] = [];
-        for await (const chunk of content) {
-          chunks.push(Buffer.from(chunk).toString("utf8"));
+        if (options?.uploadAttachmentSkipsContent !== true) {
+          for await (const chunk of content) {
+            chunks.push(Buffer.from(chunk).toString("utf8"));
+          }
         }
         options?.uploadedAttachments?.push({
           mailboxId,
@@ -229,7 +233,9 @@ const buildFakeDeps = (
         })(),
         sizeBytes: 12,
         contentType: null,
-        dispose: () => {},
+        dispose: () => {
+          options?.downloadDisposeCalls?.push(`${uid}:${partId}`);
+        },
       }),
     },
     now: options?.clock ?? (() => new Date("2026-04-29T10:00:00.000Z")),
@@ -325,6 +331,32 @@ describe("sync/runSyncOnce", () => {
       storedAt: "2026-04-29T10:00:00.000Z",
     });
     expect(payload?.attachments[0]).not.toHaveProperty("driveInode");
+    expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(94);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- closes downloaded attachment streams even when upload is idempotent */
+  it("disposes downloaded attachment streams when uploadAttachment does not consume them", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const downloadDisposeCalls: string[] = [];
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 14, uidNext: 95, msgs: [mkMsgWithAttachment(94)] }],
+      ]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, {
+        uploadAttachmentSkipsContent: true,
+        downloadDisposeCalls,
+      }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(downloadDisposeCalls).toEqual(["94:2"]);
+    const stored = drive.folders.get("work")?.get("INBOX");
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(94);
   });
 
