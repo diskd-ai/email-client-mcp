@@ -34,6 +34,7 @@ Key constraints:
 - Checkpoint correctness is more important than maximum throughput for v1.
 - Drive `messagesStore` attachment API already exposes the upload lifecycle: `uploadStart`, HTTP `PUT` to upload URL, then `uploadCommit`.
 - The Drive upload endpoint requires `Content-Length` and `X-Upload-Intent-Id`; it streams the request body onward instead of expecting bytes in JSON-RPC.
+- `Content-Length` must match the IMAP download stream length. Use `imapflow.download(...).meta.expectedSize` for upload intent size and PUT `Content-Length`, because BODYSTRUCTURE attachment size can describe encoded part size and may not match decoded stream bytes.
 - Drive stores attachment metadata in a per-mailbox SQLite `attachments` table (`attachment_id`, filename, content type, size, `drive_inode`) and stores bytes as Drive files under a lazily-created per-message folder.
 - `messagesStore` does not mutate the opaque message payload when an attachment row is committed; `email-client-mcp` must patch payload attachment refs explicitly before message upsert.
 - `imapflow.download(uid, partId, { uid: true })` returns a decoded stream for a bodystructure part and handles transfer encoding/charset for text parts.
@@ -87,11 +88,11 @@ The message row must exist before attachment upload starts: Drive stores a per-m
 The upload lifecycle per attachment:
 
 1. Ensure the message row exists via the initial message upsert.
-2. Call messagesStore attachment `uploadStart` with stable `attachmentId`, filename, content type, and size.
-3. Call IMAP `download(uid, partId, { uid: true })` to get a readable stream.
+2. Call IMAP `download(uid, partId, { uid: true })` to get a readable stream and `meta.expectedSize`.
+3. Call messagesStore attachment `uploadStart` with stable `attachmentId`, filename, content type, and upload size from `meta.expectedSize`.
 4. Stream that readable directly into the returned upload URL using HTTP `PUT` with:
    - `X-Upload-Intent-Id: <intentId>`;
-   - `Content-Length: <sizeBytes>`;
+   - `Content-Length: <meta.expectedSize>`;
    - `Content-Type: <contentType>`.
 5. Read the upload response `etag`.
 6. Call messagesStore attachment `uploadCommit` with `attachmentId`, `intentId`, and `etag`.

@@ -103,7 +103,12 @@ export type SyncDeps = {
       path: string,
       uid: number,
       partId: string,
-    ) => AsyncIterable<Uint8Array>;
+    ) => Promise<{
+      readonly content: AsyncIterable<Uint8Array>;
+      readonly sizeBytes: number | null;
+      readonly contentType: string | null;
+      readonly dispose: () => void;
+    }>;
   };
   readonly now: () => Date;
 };
@@ -335,20 +340,26 @@ const syncFolder = async (
 
           for (const rawAttachment of payload.attachments) {
             const attachment = withAttachmentId(rawAttachment, status.uidValidity, uid);
-            const content = deps.imap.downloadPart(
+            const downloaded = await deps.imap.downloadPart(
               account.name,
               folderPath,
               uid,
               attachment.partId,
             );
+            const uploadAttachment = {
+              ...attachment,
+              sizeBytes: downloaded.sizeBytes ?? attachment.sizeBytes,
+              contentType: downloaded.contentType ?? attachment.contentType,
+            };
             const uploaded = await deps.drive.uploadAttachment(
               mailboxId,
               folderId,
               externalId,
-              attachment,
-              content,
+              uploadAttachment,
+              downloaded.content,
             );
             if (uploaded.tag === "Err") {
+              downloaded.dispose();
               return await finishWithError(uploaded.error);
             }
             payload = patchAttachmentStorageRef(payload, attachment.attachmentId, uploaded.value);

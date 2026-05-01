@@ -223,10 +223,15 @@ const buildFakeDeps = (
           if (m.uid >= fromUid && m.uid <= toUid) yield m;
         }
       },
-      downloadPart: async function* (_accountId, _path, uid, partId) {
-        yield Buffer.from(`uid-${uid}`);
-        yield Buffer.from(`-part-${partId}`);
-      },
+      downloadPart: async (_accountId, _path, uid, partId) => ({
+        content: (async function* (): AsyncIterable<Uint8Array> {
+          yield Buffer.from(`uid-${uid}`);
+          yield Buffer.from(`-part-${partId}`);
+        })(),
+        sizeBytes: 12,
+        contentType: null,
+        dispose: () => {},
+      }),
     },
     now: options?.clock ?? (() => new Date("2026-04-29T10:00:00.000Z")),
   };

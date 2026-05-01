@@ -232,34 +232,63 @@ export const fetchOneByUid = async (
   };
 };
 
-/**
- * Envelope-only fetch over a UID range. Used by `list_emails` and the
- * watcher's flag-reconciliation pass (no body, no bodyStructure).
- */
-export async function* downloadPartByUid(
+export type DownloadedPart = {
+  readonly content: AsyncIterable<Uint8Array>;
+  readonly sizeBytes: number | null;
+  readonly contentType: string | null;
+  readonly dispose: () => void;
+};
+
+export const downloadPartByUid = async (
   client: ImapFlow,
   mailbox: string,
   uid: number,
   partId: string,
-): AsyncIterable<Uint8Array> {
-  let lock: MailboxLockObject | null = null;
-  try {
-    lock = await client.getMailboxLock(mailbox);
-    const downloaded = await client.download(String(uid), partId, { uid: true });
-    for await (const chunk of downloaded.content) {
-      if (typeof chunk === "string") {
-        yield Buffer.from(chunk);
-      } else if (chunk instanceof Uint8Array) {
-        yield chunk;
-      } else {
-        yield Buffer.from(chunk as ArrayBuffer);
-      }
+): Promise<DownloadedPart> => {
+  const lock = await client.getMailboxLock(mailbox);
+  let released = false;
+  const release = (): void => {
+    if (!released) {
+      released = true;
+      lock.release();
     }
-  } finally {
-    if (lock !== null) lock.release();
-  }
-}
+  };
 
+  try {
+    const downloaded = await client.download(String(uid), partId, { uid: true });
+    const content = async function* (): AsyncIterable<Uint8Array> {
+      try {
+        for await (const chunk of downloaded.content) {
+          if (typeof chunk === "string") {
+            yield Buffer.from(chunk);
+          } else if (chunk instanceof Uint8Array) {
+            yield chunk;
+          } else {
+            yield Buffer.from(chunk as ArrayBuffer);
+          }
+        }
+      } finally {
+        release();
+      }
+    };
+    return {
+      content: content(),
+      sizeBytes: Number.isFinite(downloaded.meta.expectedSize)
+        ? Number(downloaded.meta.expectedSize)
+        : null,
+      contentType: downloaded.meta.contentType || null,
+      dispose: release,
+    };
+  } catch (cause) {
+    release();
+    throw cause;
+  }
+};
+
+/**
+ * Envelope-only fetch over a UID range. Used by `list_emails` and the
+ * watcher's flag-reconciliation pass (no body, no bodyStructure).
+ */
 export async function* fetchEnvelopesUidRange(
   client: ImapFlow,
   fromUid: number,

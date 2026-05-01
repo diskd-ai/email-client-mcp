@@ -135,12 +135,10 @@ const main = async (): Promise<void> => {
         });
         for (const m of buf) yield m as never;
       },
-      downloadPart: async function* (accountId, path, uid, partId) {
+      downloadPart: async (accountId, path, uid, partId) => {
         const c = await pool.forAccount(accountId);
         if (c.tag === "Err") throw new Error(errorMessage(c.error));
-        for await (const chunk of downloadPartByUid(c.value, path, uid, partId)) {
-          yield chunk;
-        }
+        return await downloadPartByUid(c.value, path, uid, partId);
       },
     },
     now: () => new Date(),
