@@ -236,6 +236,30 @@ export const fetchOneByUid = async (
  * Envelope-only fetch over a UID range. Used by `list_emails` and the
  * watcher's flag-reconciliation pass (no body, no bodyStructure).
  */
+export async function* downloadPartByUid(
+  client: ImapFlow,
+  mailbox: string,
+  uid: number,
+  partId: string,
+): AsyncIterable<Uint8Array> {
+  let lock: MailboxLockObject | null = null;
+  try {
+    lock = await client.getMailboxLock(mailbox);
+    const downloaded = await client.download(String(uid), partId, { uid: true });
+    for await (const chunk of downloaded.content) {
+      if (typeof chunk === "string") {
+        yield Buffer.from(chunk);
+      } else if (chunk instanceof Uint8Array) {
+        yield chunk;
+      } else {
+        yield Buffer.from(chunk as ArrayBuffer);
+      }
+    }
+  } finally {
+    if (lock !== null) lock.release();
+  }
+}
+
 export async function* fetchEnvelopesUidRange(
   client: ImapFlow,
   fromUid: number,

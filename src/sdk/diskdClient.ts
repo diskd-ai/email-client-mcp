@@ -54,6 +54,7 @@ export const buildDiskd = (
 
   // Mirror TOML values into env only when env is empty so cluster
   // injection (mcp-hub specs.ts) always wins.
+  ensureEnv("APIS_WORKSPACE_ID", workspaceId);
   if (sdkSettings?.api_key) ensureEnv("APIS_API_KEY", sdkSettings.api_key);
   if (sdkSettings?.base_url) ensureEnv("APIS_BASE_URL", sdkSettings.base_url);
 

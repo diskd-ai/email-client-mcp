@@ -52,6 +52,18 @@ const buildFakeDeps = (
   drive: FakeDriveState,
   options?: {
     readonly upsertMessagesError?: { triggerOnCallNumber: number; message: string };
+    readonly uploadAttachmentError?: { readonly attachmentId: string; readonly message: string };
+    readonly uploadedAttachments?: Array<{
+      readonly mailboxId: string;
+      readonly folderId: string;
+      readonly externalId: string;
+      readonly attachmentId: string;
+      readonly partId: string;
+      readonly filename: string;
+      readonly contentType: string;
+      readonly sizeBytes: number;
+      readonly chunks: readonly string[];
+    }>;
     readonly clock?: () => Date;
   },
 ): SyncDeps => {
@@ -141,6 +153,35 @@ const buildFakeDeps = (
         if (f === undefined) return Ok(null);
         return Ok(f.payloads.get(externalId) ?? null);
       },
+      uploadAttachment: async (mailboxId, folderId, externalId, attachment, content) => {
+        if (options?.uploadAttachmentError?.attachmentId === attachment.attachmentId) {
+          return Err({
+            kind: "DriveError",
+            message: options.uploadAttachmentError.message,
+          } as AppError);
+        }
+        const chunks: string[] = [];
+        for await (const chunk of content) {
+          chunks.push(Buffer.from(chunk).toString("utf8"));
+        }
+        options?.uploadedAttachments?.push({
+          mailboxId,
+          folderId,
+          externalId,
+          attachmentId: attachment.attachmentId,
+          partId: attachment.partId,
+          filename: attachment.filename,
+          contentType: attachment.contentType,
+          sizeBytes: attachment.sizeBytes,
+          chunks,
+        });
+        return Ok({
+          attachmentId: attachment.attachmentId,
+          driveInode: `inode-${attachment.attachmentId}`,
+          storedSizeBytes: attachment.sizeBytes,
+          storedAt: "2026-04-29T10:00:00.000Z",
+        });
+      },
     },
     imap: {
       listFolders: async () =>
@@ -174,6 +215,10 @@ const buildFakeDeps = (
           if (m.uid >= fromUid && m.uid <= toUid) yield m;
         }
       },
+      downloadPart: async function* (_accountId, _path, uid, partId) {
+        yield Buffer.from(`uid-${uid}`);
+        yield Buffer.from(`-part-${partId}`);
+      },
     },
     now: options?.clock ?? (() => new Date("2026-04-29T10:00:00.000Z")),
   };
@@ -187,6 +232,22 @@ const mkMsg = (uid: number): FetchedMessageLike => ({
     messageId: `<${uid}@x>`,
     from: [{ address: "a@b" }],
     to: [{ address: "c@d" }],
+  },
+});
+
+const mkMsgWithAttachment = (uid: number, partId = "2", sizeBytes = 12): FetchedMessageLike => ({
+  ...mkMsg(uid),
+  bodyStructure: {
+    type: "multipart/mixed",
+    childNodes: [
+      {
+        type: "application/pdf",
+        part: partId,
+        disposition: "attachment",
+        dispositionParameters: { filename: `file-${uid}.pdf` },
+        size: sizeBytes,
+      },
+    ],
   },
 });
 
@@ -211,6 +272,84 @@ describe("sync/runSyncOnce", () => {
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(3);
   });
 
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- stores attachment bytes before checkpointing a message */
+  it("uploads attachment streams and patches payload refs before advancing checkpoint", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const uploadedAttachments: NonNullable<
+      Parameters<typeof buildFakeDeps>[2]
+    >["uploadedAttachments"] = [];
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 14, uidNext: 95, msgs: [mkMsgWithAttachment(94)] }],
+      ]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { uploadedAttachments }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(uploadedAttachments).toEqual([
+      {
+        mailboxId: "work",
+        folderId: "INBOX",
+        externalId: "14:94",
+        attachmentId: "14:94:2",
+        partId: "2",
+        filename: "file-94.pdf",
+        contentType: "application/pdf",
+        sizeBytes: 12,
+        chunks: ["uid-94", "-part-2"],
+      },
+    ]);
+    const stored = drive.folders.get("work")?.get("INBOX");
+    const payload = stored?.payloads.get("14:94");
+    expect(payload?.attachments[0]).toMatchObject({
+      attachmentId: "14:94:2",
+      driveInode: "inode-14:94:2",
+      storedSizeBytes: 12,
+      storedAt: "2026-04-29T10:00:00.000Z",
+    });
+    expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(94);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- attachment upload failure blocks checkpoint advancement for that UID */
+  it("does not checkpoint a UID whose attachment upload fails", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([
+        [
+          "INBOX",
+          {
+            uidValidity: 14,
+            uidNext: 97,
+            msgs: [mkMsg(94), mkMsgWithAttachment(95), mkMsgWithAttachment(96)],
+          },
+        ],
+      ]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, {
+        uploadAttachmentError: { attachmentId: "14:96:2", message: "upload failed" },
+      }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toContain("upload failed");
+    const stored = drive.folders.get("work")?.get("INBOX");
+    expect(stored?.messageIds.has("14:94")).toBe(true);
+    expect(stored?.messageIds.has("14:95")).toBe(true);
+    expect(stored?.messageIds.has("14:96")).toBe(false);
+    expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(95);
+    expect((stored?.metadata as unknown as SyncState).lastSyncError).toContain("upload failed");
+  });
+
   /* REQUIREMENT end:comm/email-client-mcp/sync -- lastSyncedUid does not advance when upsertBatch fails (next tick replays) */
   it("does not advance checkpoint when upsertBatch fails", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
@@ -219,9 +358,10 @@ describe("sync/runSyncOnce", () => {
       folders: [{ path: "INBOX", specialUse: null }],
       messagesByFolder: new Map([["INBOX", { uidValidity: 1, uidNext: 76, msgs: messages }]]),
     };
-    // Fail on the SECOND upsert call (after 50 messages succeed).
+    // Fail on UID 51 (after 50 messages succeed). New-message sync is
+    // message-correct even though checkpoint writes remain batched.
     const deps = buildFakeDeps(imap, drive, {
-      upsertMessagesError: { triggerOnCallNumber: 2, message: "drive 503" },
+      upsertMessagesError: { triggerOnCallNumber: 51, message: "drive 503" },
     });
     const rep = await runSyncOnce(deps, acct, watcherDefault);
     expect(rep.error).toContain("drive 503");

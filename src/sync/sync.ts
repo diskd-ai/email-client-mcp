@@ -22,8 +22,13 @@ import { type Account, isOAuthAccount, type WatcherSettings } from "../config/sc
 import { type AppError, errorMessage, type ImapError, imapError } from "../domain/errors.js";
 import { Err, type Result } from "../domain/result.js";
 import { type FetchedMessageLike, toStoredPayload } from "../imap/mapper.js";
+import {
+  patchAttachmentStorageRef,
+  type UploadAttachmentResult,
+  withAttachmentId,
+} from "../store/attachments.js";
 import { externalIdFor, sanitizeMailboxId } from "../store/conventions.js";
-import type { StoredEmailPayload, SyncState } from "../store/payloadTypes.js";
+import type { StoredAttachment, StoredEmailPayload, SyncState } from "../store/payloadTypes.js";
 
 const BATCH_SIZE = 50;
 
@@ -61,6 +66,13 @@ export type SyncDeps = {
       folderId: string,
       externalId: string,
     ) => Promise<Result<AppError, StoredEmailPayload | null>>;
+    readonly uploadAttachment: (
+      mailboxId: string,
+      folderId: string,
+      externalId: string,
+      attachment: StoredAttachment & { readonly attachmentId: string },
+      content: AsyncIterable<Uint8Array>,
+    ) => Promise<Result<AppError, UploadAttachmentResult>>;
   };
   readonly imap: {
     readonly listFolders: (
@@ -86,6 +98,12 @@ export type SyncDeps = {
       fromUid: number,
       toUid: number,
     ) => AsyncIterable<FetchedMessageLike>;
+    readonly downloadPart: (
+      accountId: string,
+      path: string,
+      uid: number,
+      partId: string,
+    ) => AsyncIterable<Uint8Array>;
   };
   readonly now: () => Date;
 };
@@ -250,10 +268,35 @@ const syncFolder = async (
   }
 
   if (toUid >= fromUid) {
+    const finishWithError = async (error: AppError): Promise<SyncFolderReport> => {
+      const w = await writeState({
+        ...(state as SyncState),
+        uidValidity: status.uidValidity,
+        uidNext: status.uidNext,
+        lastSyncedUid: lastSynced,
+        lastSyncError: errorMessage(error),
+        lastSyncFinishedAt: deps.now().toISOString(),
+      });
+      if (w.tag === "Err") {
+        return {
+          folderId,
+          newMessages,
+          reconciledFlags: 0,
+          uidValidityRolled,
+          error: errorMessage(w.error),
+        };
+      }
+      return {
+        folderId,
+        newMessages,
+        reconciledFlags: 0,
+        uidValidityRolled,
+        error: errorMessage(error),
+      };
+    };
+
     for (const [batchFrom, batchTo] of range(fromUid, toUid)) {
-      const payloads: StoredEmailPayload[] = [];
-      const externalIds: string[] = [];
-      let highestUidInBatch = lastSynced;
+      let sawMessageInBatch = false;
       try {
         for await (const bundle of deps.imap.fetchRange(
           account.name,
@@ -261,9 +304,10 @@ const syncFolder = async (
           batchFrom,
           batchTo,
         )) {
+          sawMessageInBatch = true;
           const uid = bundle.imapMessage.uid;
-          if (uid > highestUidInBatch) highestUidInBatch = uid;
-          const payload = toStoredPayload(bundle.imapMessage, {
+          const externalId = externalIdFor(status.uidValidity, uid);
+          let payload = toStoredPayload(bundle.imapMessage, {
             accountId: account.name,
             mailbox: folderPath,
             uidValidity: status.uidValidity,
@@ -272,68 +316,48 @@ const syncFolder = async (
             bodyHtml: bundle.bodyHtml,
             truncated: false,
           });
-          payloads.push(payload);
-          externalIds.push(externalIdFor(status.uidValidity, uid));
+
+          for (const rawAttachment of payload.attachments) {
+            const attachment = withAttachmentId(rawAttachment, status.uidValidity, uid);
+            const content = deps.imap.downloadPart(
+              account.name,
+              folderPath,
+              uid,
+              attachment.partId,
+            );
+            const uploaded = await deps.drive.uploadAttachment(
+              mailboxId,
+              folderId,
+              externalId,
+              attachment,
+              content,
+            );
+            if (uploaded.tag === "Err") {
+              return await finishWithError(uploaded.error);
+            }
+            payload = patchAttachmentStorageRef(payload, attachment.attachmentId, uploaded.value);
+          }
+
+          const ups = await deps.drive.upsertMessages(mailboxId, folderId, [payload], [externalId]);
+          if (ups.tag === "Err") {
+            return await finishWithError(ups.error);
+          }
+          newMessages += ups.value.inserted + ups.value.updated;
+          lastSynced = uid;
         }
       } catch (cause) {
-        // Imap fetch failure: leave checkpoint untouched, surface error.
         const e = imapError(account.name, `fetch UID ${batchFrom}:${batchTo}`, cause);
-        const w = await writeState({
-          ...(state as SyncState),
-          lastSyncError: errorMessage(e),
-          lastSyncFinishedAt: deps.now().toISOString(),
-        });
-        if (w.tag === "Err") {
-          return {
-            folderId,
-            newMessages,
-            reconciledFlags: 0,
-            uidValidityRolled,
-            error: errorMessage(w.error),
-          };
-        }
-        return {
-          folderId,
-          newMessages,
-          reconciledFlags: 0,
-          uidValidityRolled,
-          error: errorMessage(e),
-        };
+        return await finishWithError(e);
       }
-      if (payloads.length === 0) {
+
+      if (!sawMessageInBatch) {
         // Range was empty -- advance the checkpoint to the batch top
         // anyway, we now know there is nothing to fetch in there.
         lastSynced = batchTo;
-      } else {
-        const ups = await deps.drive.upsertMessages(mailboxId, folderId, payloads, externalIds);
-        if (ups.tag === "Err") {
-          // Critical: do NOT advance lastSyncedUid. Next tick replays.
-          const w = await writeState({
-            ...(state as SyncState),
-            lastSyncError: errorMessage(ups.error),
-            lastSyncFinishedAt: deps.now().toISOString(),
-          });
-          if (w.tag === "Err") {
-            return {
-              folderId,
-              newMessages,
-              reconciledFlags: 0,
-              uidValidityRolled,
-              error: errorMessage(w.error),
-            };
-          }
-          return {
-            folderId,
-            newMessages,
-            reconciledFlags: 0,
-            uidValidityRolled,
-            error: errorMessage(ups.error),
-          };
-        }
-        newMessages += ups.value.inserted + ups.value.updated;
-        lastSynced = highestUidInBatch;
       }
-      // Checkpoint: advance lastSyncedUid after the batch is durable.
+
+      // Checkpoint: write once after the batch, but the value is the
+      // highest UID whose full message payload + attachment bytes are durable.
       const checkpoint: SyncState = {
         ...(state as SyncState),
         uidValidity: status.uidValidity,

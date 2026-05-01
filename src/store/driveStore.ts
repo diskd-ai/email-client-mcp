@@ -12,11 +12,24 @@ import type { diskd as DiskdNs } from "@diskd-ai/sdk";
 import { type DriveError, driveError } from "../domain/errors.js";
 import { Err, Ok, type Result } from "../domain/result.js";
 import { isValidMailboxId } from "./conventions.js";
-import type { StoredEmailPayload, SyncState } from "./payloadTypes.js";
+import type { StoredAttachment, StoredEmailPayload, SyncState } from "./payloadTypes.js";
 
 type MessagesStore = ReturnType<typeof DiskdNs.os.messagesStore>;
 type MailboxScoped = ReturnType<MessagesStore["mailbox"]>;
 type FolderScoped = ReturnType<MailboxScoped["folder"]>;
+
+type AttachmentScoped = ReturnType<FolderScoped["message"]>["attachments"];
+
+export type UploadAttachmentInput = StoredAttachment & {
+  readonly attachmentId: string;
+};
+
+export type UploadAttachmentResult = {
+  readonly attachmentId: string;
+  readonly driveInode: string;
+  readonly storedSizeBytes: number;
+  readonly storedAt: string;
+};
 
 export type DriveStore = {
   /** Ensure mailbox exists and SQLite schema is bootstrapped. */
@@ -53,6 +66,13 @@ export type DriveStore = {
     folderId: string,
     externalId: string,
   ) => Promise<Result<DriveError, StoredEmailPayload | null>>;
+  readonly uploadAttachment: (
+    mailboxId: string,
+    folderId: string,
+    externalId: string,
+    attachment: UploadAttachmentInput,
+    content: AsyncIterable<Uint8Array>,
+  ) => Promise<Result<DriveError, UploadAttachmentResult>>;
 };
 
 const wrap = async <T>(what: string, fn: () => Promise<T>): Promise<Result<DriveError, T>> => {
@@ -65,6 +85,70 @@ const wrap = async <T>(what: string, fn: () => Promise<T>): Promise<Result<Drive
 
 const folderScoped = (store: MessagesStore, mailboxId: string, folderId: string): FolderScoped =>
   store.mailbox({ mailboxId }).folder({ folderId });
+
+const attachmentScoped = (
+  store: MessagesStore,
+  mailboxId: string,
+  folderId: string,
+  externalId: string,
+): AttachmentScoped => folderScoped(store, mailboxId, folderId).message({ externalId }).attachments;
+
+const stripTrailingSlashes = (value: string): string => value.replace(/\/+$/, "");
+
+const resolveDiskdBaseUrl = (): string => {
+  const base = process.env.APIS_BASE_URL;
+  if (base === undefined || base.length === 0) {
+    throw new Error("APIS_BASE_URL is not set");
+  }
+  return stripTrailingSlashes(base);
+};
+
+const resolveDriveRpcUrl = (): string => {
+  const base = resolveDiskdBaseUrl();
+  return base.endsWith("/v1") ? `${base}/os/drive/api/v1` : `${base}/v1/os/drive/api/v1`;
+};
+
+const resolveUploadUrl = (uploadUrl: string): string => {
+  if (/^https?:\/\//i.test(uploadUrl)) return uploadUrl;
+  const rpcUrl = resolveDriveRpcUrl();
+  const driveBase = rpcUrl.replace(/\/+$/, "").replace(/\/api\/v1$/, "");
+  return `${driveBase}${uploadUrl.startsWith("/") ? uploadUrl : `/${uploadUrl}`}`;
+};
+
+const uploadAuthHeaders = (): Record<string, string> => {
+  const apiKey = process.env.APIS_API_KEY;
+  if (apiKey === undefined || apiKey.length === 0) {
+    throw new Error("APIS_API_KEY is not set");
+  }
+  const workspaceId = process.env.APIS_WORKSPACE_ID ?? process.env.MCP_HUB_WORKSPACE_ID;
+  if (workspaceId === undefined || workspaceId.length === 0) {
+    throw new Error("workspace id is not set");
+  }
+  return {
+    "X-Api-Key": apiKey,
+    "X-Workspace-Id": workspaceId,
+    "X-User-Id": workspaceId,
+    "X-Organization-Id": workspaceId,
+  };
+};
+
+const isConflict = (cause: unknown): boolean =>
+  /CONFLICT|already exists/i.test((cause as Error)?.message ?? String(cause));
+
+const matchExistingAttachment = (
+  existing: {
+    readonly attachmentId: string;
+    readonly filename: string;
+    readonly contentType: string;
+    readonly sizeBytes: number;
+    readonly driveInode: string;
+  },
+  expected: UploadAttachmentInput,
+): boolean =>
+  existing.attachmentId === expected.attachmentId &&
+  existing.filename === expected.filename &&
+  existing.contentType === expected.contentType &&
+  existing.sizeBytes === expected.sizeBytes;
 
 export const buildDriveStore = (store: MessagesStore): DriveStore => ({
   async ensureMailbox(mailboxId, displayName) {
@@ -145,5 +229,81 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
       }
       return Err(driveError(`folder.getMessage failed: ${msg}`, cause));
     }
+  },
+  async uploadAttachment(mailboxId, folderId, externalId, attachment, content) {
+    const attachments = attachmentScoped(store, mailboxId, folderId, externalId);
+    const existingResult = async (): Promise<Result<DriveError, UploadAttachmentResult>> => {
+      const listed = await attachments.list();
+      const existing = listed.find((item) => item.attachmentId === attachment.attachmentId);
+      if (existing === undefined) {
+        return Err(
+          driveError(
+            `attachment conflict but existing row was not found: ${attachment.attachmentId}`,
+          ),
+        );
+      }
+      if (!matchExistingAttachment(existing, attachment)) {
+        return Err(
+          driveError(`attachment conflict with mismatched metadata: ${attachment.attachmentId}`),
+        );
+      }
+      return Ok({
+        attachmentId: existing.attachmentId,
+        driveInode: existing.driveInode,
+        storedSizeBytes: existing.sizeBytes,
+        storedAt: existing.createdAt,
+      });
+    };
+
+    return await wrap("attachment.upload", async () => {
+      const start = await attachments.uploadStart({
+        attachmentId: attachment.attachmentId,
+        filename: attachment.filename,
+        contentType: attachment.contentType,
+        sizeBytes: attachment.sizeBytes,
+        autoCommit: false,
+      });
+      const uploadUrl = resolveUploadUrl(start.uploadUrl);
+      const put = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: {
+          ...uploadAuthHeaders(),
+          "Content-Type": attachment.contentType,
+          "Content-Length": String(attachment.sizeBytes),
+          "X-Upload-Intent-Id": start.intentId,
+        },
+        body: content as never,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+      if (!put.ok) {
+        const text = await put.text();
+        throw new Error(`Upload PUT failed (HTTP ${put.status}): ${text.slice(0, 200)}`);
+      }
+      const putBody = (await put.json()) as { readonly etag?: string };
+      const etag = putBody.etag ?? put.headers.get("etag") ?? "";
+      if (!etag) {
+        throw new Error("Upload PUT response missing etag");
+      }
+      try {
+        const commit = await attachments.uploadCommit({
+          attachmentId: attachment.attachmentId,
+          intentId: start.intentId,
+          etag,
+          autoCommit: false,
+        });
+        return {
+          attachmentId: commit.attachmentId,
+          driveInode: commit.driveInode,
+          storedSizeBytes: commit.sizeBytes,
+          storedAt: new Date().toISOString(),
+        };
+      } catch (cause) {
+        if (!isConflict(cause)) throw cause;
+        const existing = await existingResult();
+        if (existing.tag === "Err")
+          throw new Error(existing.error.message, { cause: existing.error });
+        return existing.value;
+      }
+    });
   },
 });

@@ -22,6 +22,7 @@ import type { ImapError } from "./domain/errors.js";
 import { errorMessage } from "./domain/errors.js";
 import { Err, Ok, type Result } from "./domain/result.js";
 import {
+  downloadPartByUid,
   fetchEnvelopesUidRange,
   fetchUidRange,
   folderStatus,
@@ -133,6 +134,13 @@ const main = async (): Promise<void> => {
           return out;
         });
         for (const m of buf) yield m as never;
+      },
+      downloadPart: async function* (accountId, path, uid, partId) {
+        const c = await pool.forAccount(accountId);
+        if (c.tag === "Err") throw new Error(errorMessage(c.error));
+        for await (const chunk of downloadPartByUid(c.value, path, uid, partId)) {
+          yield chunk;
+        }
       },
     },
     now: () => new Date(),

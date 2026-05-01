@@ -18,6 +18,10 @@ export type StoredAttachment = {
   readonly contentType: string;
   readonly sizeBytes: number;
   readonly partId: string;
+  readonly attachmentId?: string;
+  readonly driveInode?: string;
+  readonly storedSizeBytes?: number;
+  readonly storedAt?: string;
 };
 
 export type StoredEmailPayload = {
