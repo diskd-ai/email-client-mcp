@@ -1,6 +1,6 @@
 {
   "name": "@diskd-ai/email-client-mcp",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Drive-backed multi-account email MCP with reliable IMAP-to-mailboxes sync.",
   "license": "LGPL-3.0-or-later",
   "repository": {
