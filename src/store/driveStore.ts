@@ -143,6 +143,10 @@ const uploadAuthHeaders = (): Record<string, string> => {
 const isConflict = (cause: unknown): boolean =>
   /CONFLICT|already exists/i.test((cause as Error)?.message ?? String(cause));
 
+const isAlreadyUploadedStart = (start: IdempotentUploadStartResult): boolean =>
+  start.alreadyUploaded === true ||
+  (start.intentId === "already-uploaded" && start.uploadUrl === "already-uploaded://attachment");
+
 const matchExistingAttachment = (
   existing: {
     readonly attachmentId: string;
@@ -279,12 +283,18 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
           throw new Error(existing.error.message, { cause: existing.error });
         return existing.value;
       }
-      if (start.alreadyUploaded === true) {
-        return {
-          attachmentId: start.attachmentId ?? attachment.attachmentId,
-          storedSizeBytes: start.sizeBytes ?? attachment.sizeBytes,
-          storedAt: start.createdAt ?? new Date().toISOString(),
-        };
+      if (isAlreadyUploadedStart(start)) {
+        if (start.attachmentId && start.sizeBytes !== undefined && start.createdAt) {
+          return {
+            attachmentId: start.attachmentId,
+            storedSizeBytes: start.sizeBytes,
+            storedAt: start.createdAt,
+          };
+        }
+        const existing = await existingResult();
+        if (existing.tag === "Err")
+          throw new Error(existing.error.message, { cause: existing.error });
+        return existing.value;
       }
       if (!start.intentId || !start.uploadUrl) {
         throw new Error("attachment.uploadStart response missing upload intent");

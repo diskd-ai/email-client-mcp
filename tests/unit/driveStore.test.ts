@@ -11,6 +11,7 @@ const buildStore = (options?: {
   readonly commitConflict?: boolean;
   readonly listedSize?: number;
   readonly alreadyUploaded?: boolean;
+  readonly sentinelAlreadyUploaded?: boolean;
 }) => {
   const attachments = {
     uploadStart: vi.fn(async () =>
@@ -23,7 +24,12 @@ const buildStore = (options?: {
             sizeBytes: options?.listedSize ?? 11,
             createdAt: "2026-04-29T10:00:00.000Z",
           }
-        : { alreadyUploaded: false, intentId: "intent-1", uploadUrl: "/api/v1/drive/upload" },
+        : options?.sentinelAlreadyUploaded
+          ? {
+              intentId: "already-uploaded",
+              uploadUrl: "already-uploaded://attachment",
+            }
+          : { alreadyUploaded: false, intentId: "intent-1", uploadUrl: "/api/v1/drive/upload" },
     ),
     uploadCommit: vi.fn(async () => {
       if (options?.commitConflict) throw new Error("JSON-RPC error: CONFLICT");
@@ -148,6 +154,38 @@ describe("store/buildDriveStore attachment upload", () => {
     expect(result.tag).toBe("Ok");
     expect(fetch).not.toHaveBeenCalled();
     expect(attachments.uploadCommit).not.toHaveBeenCalled();
+    if (result.tag === "Ok") {
+      expect(result.value).toEqual({
+        attachmentId: "14:94:2",
+        storedSizeBytes: 11,
+        storedAt: "2026-04-29T10:00:00.000Z",
+      });
+    }
+  });
+
+  it("treats wire-compatible idempotent upload-start sentinel as an already stored attachment", async () => {
+    const { store, attachments } = buildStore({ sentinelAlreadyUploaded: true });
+    stubFetch(vi.fn() as typeof fetch);
+
+    const drive = buildDriveStore(store as never);
+    const result = await drive.uploadAttachment(
+      "mail-w1",
+      "INBOX",
+      "14:94",
+      {
+        attachmentId: "14:94:2",
+        partId: "2",
+        filename: "report.pdf",
+        contentType: "application/pdf",
+        sizeBytes: 11,
+      },
+      chunks(),
+    );
+
+    expect(result.tag).toBe("Ok");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(attachments.uploadCommit).not.toHaveBeenCalled();
+    expect(attachments.list).toHaveBeenCalledTimes(1);
     if (result.tag === "Ok") {
       expect(result.value).toEqual({
         attachmentId: "14:94:2",
