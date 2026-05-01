@@ -20,6 +20,15 @@ type FolderScoped = ReturnType<MailboxScoped["folder"]>;
 
 type AttachmentScoped = ReturnType<FolderScoped["message"]>["attachments"];
 
+type IdempotentUploadStartResult = {
+  readonly alreadyUploaded?: boolean;
+  readonly intentId?: string | null;
+  readonly uploadUrl?: string | null;
+  readonly attachmentId?: string;
+  readonly sizeBytes?: number;
+  readonly createdAt?: string;
+};
+
 export type UploadAttachmentInput = StoredAttachment & {
   readonly attachmentId: string;
 };
@@ -254,13 +263,32 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
     };
 
     return await wrap("attachment.upload", async () => {
-      const start = await attachments.uploadStart({
-        attachmentId: attachment.attachmentId,
-        filename: attachment.filename,
-        contentType: attachment.contentType,
-        sizeBytes: attachment.sizeBytes,
-        autoCommit: false,
-      });
+      let start: IdempotentUploadStartResult;
+      try {
+        start = (await attachments.uploadStart({
+          attachmentId: attachment.attachmentId,
+          filename: attachment.filename,
+          contentType: attachment.contentType,
+          sizeBytes: attachment.sizeBytes,
+          autoCommit: false,
+        })) as IdempotentUploadStartResult;
+      } catch (cause) {
+        if (!isConflict(cause)) throw cause;
+        const existing = await existingResult();
+        if (existing.tag === "Err")
+          throw new Error(existing.error.message, { cause: existing.error });
+        return existing.value;
+      }
+      if (start.alreadyUploaded === true) {
+        return {
+          attachmentId: start.attachmentId ?? attachment.attachmentId,
+          storedSizeBytes: start.sizeBytes ?? attachment.sizeBytes,
+          storedAt: start.createdAt ?? new Date().toISOString(),
+        };
+      }
+      if (!start.intentId || !start.uploadUrl) {
+        throw new Error("attachment.uploadStart response missing upload intent");
+      }
       const uploadUrl = resolveUploadUrl(start.uploadUrl);
       const put = await fetch(uploadUrl, {
         method: "PUT",
