@@ -185,7 +185,6 @@ const buildFakeDeps = (
         });
         return Ok({
           attachmentId: attachment.attachmentId,
-          driveInode: `inode-${attachment.attachmentId}`,
           storedSizeBytes: attachment.sizeBytes,
           storedAt: "2026-04-29T10:00:00.000Z",
         });
@@ -322,10 +321,10 @@ describe("sync/runSyncOnce", () => {
     const payload = stored?.payloads.get("14:94");
     expect(payload?.attachments[0]).toMatchObject({
       attachmentId: "14:94:2",
-      driveInode: "inode-14:94:2",
       storedSizeBytes: 12,
       storedAt: "2026-04-29T10:00:00.000Z",
     });
+    expect(payload?.attachments[0]).not.toHaveProperty("driveInode");
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(94);
   });
 

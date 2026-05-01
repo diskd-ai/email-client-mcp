@@ -87,9 +87,9 @@ describe("store/buildDriveStore attachment upload", () => {
     if (result.tag === "Ok") {
       expect(result.value).toMatchObject({
         attachmentId: "14:94:2",
-        driveInode: "inode-new",
         storedSizeBytes: 11,
       });
+      expect("driveInode" in result.value).toBe(false);
     }
     expect(consumed).toEqual(["hello", "-", "world"]);
     expect(fetch).toHaveBeenCalledWith(
@@ -140,7 +140,7 @@ describe("store/buildDriveStore attachment upload", () => {
     expect(result.tag).toBe("Ok");
     expect(attachments.list).toHaveBeenCalledTimes(1);
     if (result.tag === "Ok") {
-      expect(result.value.driveInode).toBe("inode-existing");
+      expect("driveInode" in result.value).toBe(false);
       expect(result.value.storedAt).toBe("2026-04-29T10:00:00.000Z");
     }
   });

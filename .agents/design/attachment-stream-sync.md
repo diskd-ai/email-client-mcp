@@ -97,7 +97,7 @@ The upload lifecycle per attachment:
    - `Content-Type: <contentType>`.
 6. Read the upload response `etag`.
 7. Call messagesStore attachment `uploadCommit` with `attachmentId`, `intentId`, and `etag`.
-8. Patch the attachment entry in the message payload with `attachmentId`, `driveInode`, `storedSizeBytes`, and `storedAt`.
+8. Patch the attachment entry in the message payload with `attachmentId`, `storedSizeBytes`, and `storedAt`. Do not copy `driveInode` into the message payload; it is a Drive-domain internal identifier stored only in Drive attachment rows.
 9. Final-upsert the patched message payload.
 
 The Drive-side contract treats duplicate `attachment_id` on the same message as `CONFLICT`. Retry logic should make this idempotent in `email-client-mcp`: list/get the existing stored attachment, accept it only when metadata matches the intended upload, and otherwise fail the UID rather than silently overwriting bytes.
@@ -215,7 +215,7 @@ Implementation outline
 ----------------------
 
 Phase 1: attachment storage types and IDs
-- Extend `StoredAttachment` with optional persisted fields: `attachmentId`, `driveInode`, `storedSizeBytes`, `storedAt`.
+- Extend `StoredAttachment` with optional persisted fields: `attachmentId`, `storedSizeBytes`, `storedAt`.
 - Add pure helper for deterministic attachment IDs.
 - Add pure helper to patch attachment storage references back into a message payload.
 
@@ -256,7 +256,7 @@ Unit tests:
 - `tests/unit/sync.test.ts`
   - Case: one message with one attachment succeeds.
     - Assert `uploadAttachment` is called with mailbox id, folder id, message externalId, part id, filename, content type, and size.
-    - Assert message payload is upserted with attachment `attachmentId` and `driveInode`.
+    - Assert message payload is upserted with `attachmentId` and no `driveInode`.
     - Assert checkpoint advances to the message UID.
   - Case: attachment upload fails.
     - Assert the initial message row may exist because Drive requires it before `uploadStart`.
@@ -294,7 +294,7 @@ Acceptance criteria
 -------------------
 
 - Given a new IMAP message with one attachment, when watcher syncs the folder, then the message checkpoint advances only after the attachment is stored in messagesStore and the final payload includes storage refs.
-- Given that attachment upload succeeds, when app-service reads the message detail, then the opaque message payload attachment entry includes stable storage references (`attachmentId`, `driveInode`, `storedSizeBytes`, `storedAt`) populated by `email-client-mcp` after Drive `uploadCommit`.
+- Given that attachment upload succeeds, when app-service reads the message detail, then the opaque message payload attachment entry includes public storage references (`attachmentId`, `storedSizeBytes`, `storedAt`) populated by `email-client-mcp` after Drive `uploadCommit`, and does not expose Drive-domain `driveInode`.
 - Given attachment upload fails for UID N, when sync finishes, then folder metadata has `lastSyncedUid < N` and `lastSyncError` is non-null.
 - Given the next tick runs after that failure, then UID N is retried.
 - Given UID 95 succeeds and UID 96 fails, then checkpoint is 95 even if the IMAP fetch batch included later UIDs.

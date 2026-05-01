@@ -19,7 +19,6 @@ export type StoredAttachment = {
   readonly sizeBytes: number;
   readonly partId: string;
   readonly attachmentId?: string;
-  readonly driveInode?: string;
   readonly storedSizeBytes?: number;
   readonly storedAt?: string;
 };

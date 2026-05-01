@@ -26,7 +26,6 @@ export type UploadAttachmentInput = StoredAttachment & {
 
 export type UploadAttachmentResult = {
   readonly attachmentId: string;
-  readonly driveInode: string;
   readonly storedSizeBytes: number;
   readonly storedAt: string;
 };
@@ -249,7 +248,6 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
       }
       return Ok({
         attachmentId: existing.attachmentId,
-        driveInode: existing.driveInode,
         storedSizeBytes: existing.sizeBytes,
         storedAt: existing.createdAt,
       });
@@ -293,7 +291,6 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
         });
         return {
           attachmentId: commit.attachmentId,
-          driveInode: commit.driveInode,
           storedSizeBytes: commit.sizeBytes,
           storedAt: new Date().toISOString(),
         };

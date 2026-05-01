@@ -2,7 +2,6 @@ import type { StoredAttachment, StoredEmailPayload } from "./payloadTypes.js";
 
 export type StoredAttachmentRef = {
   readonly attachmentId: string;
-  readonly driveInode: string;
   readonly storedSizeBytes: number;
   readonly storedAt: string;
 };
@@ -33,7 +32,6 @@ export const patchAttachmentStorageRef = (
       ? {
           ...attachment,
           attachmentId,
-          driveInode: ref.driveInode,
           storedSizeBytes: ref.storedSizeBytes,
           storedAt: ref.storedAt,
         }
