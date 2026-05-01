@@ -239,7 +239,7 @@ export type DownloadedPart = {
   readonly dispose: () => void;
 };
 
-export const downloadPartByUid = async (
+const openDownloadedPartByUid = async (
   client: ImapFlow,
   mailbox: string,
   uid: number,
@@ -273,9 +273,7 @@ export const downloadPartByUid = async (
     };
     return {
       content: content(),
-      sizeBytes: Number.isFinite(downloaded.meta.expectedSize)
-        ? Number(downloaded.meta.expectedSize)
-        : null,
+      sizeBytes: null,
       contentType: downloaded.meta.contentType || null,
       dispose: release,
     };
@@ -283,6 +281,30 @@ export const downloadPartByUid = async (
     release();
     throw cause;
   }
+};
+
+export const downloadPartByUid = async (
+  client: ImapFlow,
+  mailbox: string,
+  uid: number,
+  partId: string,
+): Promise<DownloadedPart> => {
+  // Drive proxy requires an exact Content-Length. imapflow's
+  // meta.expectedSize is the IMAP fetch response size for encoded parts,
+  // not necessarily the decoded stream byte length. Count one streaming pass,
+  // then reopen the same part for the actual upload stream.
+  const probe = await openDownloadedPartByUid(client, mailbox, uid, partId);
+  let sizeBytes = 0;
+  try {
+    for await (const chunk of probe.content) {
+      sizeBytes += chunk.byteLength;
+    }
+  } finally {
+    probe.dispose();
+  }
+
+  const upload = await openDownloadedPartByUid(client, mailbox, uid, partId);
+  return { ...upload, sizeBytes };
 };
 
 /**

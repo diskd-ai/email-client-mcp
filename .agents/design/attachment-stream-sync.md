@@ -34,7 +34,7 @@ Key constraints:
 - Checkpoint correctness is more important than maximum throughput for v1.
 - Drive `messagesStore` attachment API already exposes the upload lifecycle: `uploadStart`, HTTP `PUT` to upload URL, then `uploadCommit`.
 - The Drive upload endpoint requires `Content-Length` and `X-Upload-Intent-Id`; it streams the request body onward instead of expecting bytes in JSON-RPC.
-- `Content-Length` must match the IMAP download stream length. Use `imapflow.download(...).meta.expectedSize` for upload intent size and PUT `Content-Length`, because BODYSTRUCTURE attachment size can describe encoded part size and may not match decoded stream bytes.
+- `Content-Length` must match the decoded IMAP download stream length. `imapflow.download(...).meta.expectedSize` and BODYSTRUCTURE attachment size can describe encoded part size and may not match decoded stream bytes; v1 counts one streaming pass and reopens the part for upload to avoid whole-file buffering.
 - Drive stores attachment metadata in a per-mailbox SQLite `attachments` table (`attachment_id`, filename, content type, size, `drive_inode`) and stores bytes as Drive files under a lazily-created per-message folder.
 - `messagesStore` does not mutate the opaque message payload when an attachment row is committed; `email-client-mcp` must patch payload attachment refs explicitly before message upsert.
 - `imapflow.download(uid, partId, { uid: true })` returns a decoded stream for a bodystructure part and handles transfer encoding/charset for text parts.
@@ -88,16 +88,17 @@ The message row must exist before attachment upload starts: Drive stores a per-m
 The upload lifecycle per attachment:
 
 1. Ensure the message row exists via the initial message upsert.
-2. Call IMAP `download(uid, partId, { uid: true })` to get a readable stream and `meta.expectedSize`.
-3. Call messagesStore attachment `uploadStart` with stable `attachmentId`, filename, content type, and upload size from `meta.expectedSize`.
-4. Stream that readable directly into the returned upload URL using HTTP `PUT` with:
+2. Call IMAP `download(uid, partId, { uid: true })` once to count decoded stream bytes without buffering.
+3. Reopen the same IMAP part for the upload stream.
+4. Call messagesStore attachment `uploadStart` with stable `attachmentId`, filename, content type, and counted decoded byte size.
+5. Stream that readable directly into the returned upload URL using HTTP `PUT` with:
    - `X-Upload-Intent-Id: <intentId>`;
-   - `Content-Length: <meta.expectedSize>`;
+   - `Content-Length: <countedDecodedSizeBytes>`;
    - `Content-Type: <contentType>`.
-5. Read the upload response `etag`.
-6. Call messagesStore attachment `uploadCommit` with `attachmentId`, `intentId`, and `etag`.
-7. Patch the attachment entry in the message payload with `attachmentId`, `driveInode`, `storedSizeBytes`, and `storedAt`.
-8. Final-upsert the patched message payload.
+6. Read the upload response `etag`.
+7. Call messagesStore attachment `uploadCommit` with `attachmentId`, `intentId`, and `etag`.
+8. Patch the attachment entry in the message payload with `attachmentId`, `driveInode`, `storedSizeBytes`, and `storedAt`.
+9. Final-upsert the patched message payload.
 
 The Drive-side contract treats duplicate `attachment_id` on the same message as `CONFLICT`. Retry logic should make this idempotent in `email-client-mcp`: list/get the existing stored attachment, accept it only when metadata matches the intended upload, and otherwise fail the UID rather than silently overwriting bytes.
 
