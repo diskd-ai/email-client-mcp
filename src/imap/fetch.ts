@@ -26,9 +26,12 @@ type BodyPartCandidate = {
 type BodyStructureNode = {
   readonly type?: string | undefined;
   readonly part?: string | undefined;
+  readonly encoding?: string | undefined;
   readonly disposition?: string | undefined;
   readonly dispositionParameters?: { readonly filename?: string | undefined } | undefined;
-  readonly parameters?: { readonly name?: string | undefined } | undefined;
+  readonly parameters?:
+    | { readonly name?: string | undefined; readonly charset?: string | undefined }
+    | undefined;
   readonly childNodes?: readonly BodyStructureNode[] | undefined;
 };
 
@@ -110,9 +113,105 @@ export const folderStatus = async (
   };
 };
 
-const decodeBuffer = (b: Buffer | undefined | null): string | null => {
+const findBodyStructureNodeByPartId = (
+  bodyStructure: unknown,
+  partId: string,
+): BodyStructureNode | null => {
+  const visit = (raw: unknown): BodyStructureNode | null => {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+    const node = raw as BodyStructureNode;
+    const type = node.type?.toLowerCase();
+    const nodePartId = node.part ?? fallbackSinglePartId(type);
+    if (nodePartId === partId) return node;
+    for (const child of node.childNodes ?? []) {
+      const found = visit(child);
+      if (found !== null) return found;
+    }
+    return null;
+  };
+  return visit(bodyStructure);
+};
+
+const normalizeToken = (value: string | null | undefined): string | null => {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim().replace(/^"|"$/g, "").toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const normalizeCharset = (charset: string | null | undefined): string => {
+  const normalized = normalizeToken(charset);
+  if (normalized === null || normalized === "default") return "utf-8";
+  if (normalized === "utf8") return "utf-8";
+  if (normalized === "latin1" || normalized === "latin-1") return "iso-8859-1";
+  if (normalized === "win-1251") return "windows-1251";
+  return normalized;
+};
+
+const decodeQuotedPrintableBytes = (input: Buffer): Buffer => {
+  const text = input.toString("latin1").replace(/=\r?\n/g, "");
+  const bytes: number[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i] as string;
+    if (ch === "=" && i + 2 < text.length) {
+      const hex = text.slice(i + 1, i + 3);
+      if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+        bytes.push(Number.parseInt(hex, 16));
+        i += 2;
+        continue;
+      }
+    }
+    bytes.push(ch.charCodeAt(0) & 0xff);
+  }
+  return Buffer.from(bytes);
+};
+
+const decodeTransferEncodingBytes = (
+  input: Buffer,
+  transferEncoding: string | null | undefined,
+): Buffer => {
+  const encoding = normalizeToken(transferEncoding);
+  if (encoding === "base64") {
+    return Buffer.from(input.toString("ascii").replace(/\s+/g, ""), "base64");
+  }
+  if (encoding === "quoted-printable") {
+    return decodeQuotedPrintableBytes(input);
+  }
+  return input;
+};
+
+const WINDOWS_1251_80_BF =
+  "\u0402\u0403\u201A\u0453\u201E\u2026\u2020\u2021\u20AC\u2030\u0409\u2039\u040A\u040C\u040B\u040F" +
+  "\u0452\u2018\u2019\u201C\u201D\u2022\u2013\u2014\uFFFD\u2122\u0459\u203A\u045A\u045C\u045B\u045F" +
+  "\u00A0\u040E\u045E\u0408\u00A4\u0490\u00A6\u00A7\u0401\u00A9\u0404\u00AB\u00AC\u00AD\u00AE\u0407" +
+  "\u00B0\u00B1\u0406\u0456\u0491\u00B5\u00B6\u00B7\u0451\u2116\u0454\u00BB\u0458\u0405\u0455\u0457";
+
+const decodeWindows1251 = (input: Buffer): string => {
+  let out = "";
+  for (const byte of input) {
+    if (byte < 0x80) out += String.fromCharCode(byte);
+    else if (byte < 0xc0) out += WINDOWS_1251_80_BF[byte - 0x80] ?? "\uFFFD";
+    else out += String.fromCharCode(0x0410 + byte - 0xc0);
+  }
+  return out;
+};
+
+const decodeBytesWithCharset = (input: Buffer, charset: string | null | undefined): string => {
+  const label = normalizeCharset(charset);
+  if (label === "windows-1251") return decodeWindows1251(input).replace(/^\uFEFF/, "");
+  try {
+    return new TextDecoder(label).decode(input).replace(/^\uFEFF/, "");
+  } catch {
+    return new TextDecoder("utf-8").decode(input).replace(/^\uFEFF/, "");
+  }
+};
+
+export const decodeMimeBodyPart = (
+  b: Buffer | undefined | null,
+  options?: { readonly transferEncoding?: string | null; readonly charset?: string | null },
+): string | null => {
   if (!b || b.length === 0) return null;
-  return b.toString("utf8");
+  const bytes = decodeTransferEncodingBytes(b, options?.transferEncoding);
+  return decodeBytesWithCharset(bytes, options?.charset);
 };
 
 const fetchDisplayBodies = async (
@@ -124,6 +223,8 @@ const fetchDisplayBodies = async (
   readonly bodyHtml: string | null;
 }> => {
   const { textPartId, htmlPartId } = findDisplayBodyPartIds(bodyStructure);
+  const textNode = textPartId ? findBodyStructureNodeByPartId(bodyStructure, textPartId) : null;
+  const htmlNode = htmlPartId ? findBodyStructureNodeByPartId(bodyStructure, htmlPartId) : null;
   const partIds = [...new Set([textPartId, htmlPartId].filter((id): id is string => id !== null))];
   if (partIds.length === 0) {
     return { bodyText: null, bodyHtml: null };
@@ -141,8 +242,18 @@ const fetchDisplayBodies = async (
   const bodyParts = bodyMsg === false ? undefined : bodyMsg.bodyParts;
 
   return {
-    bodyText: textPartId ? decodeBuffer(bodyParts?.get(textPartId) as Buffer | undefined) : null,
-    bodyHtml: htmlPartId ? decodeBuffer(bodyParts?.get(htmlPartId) as Buffer | undefined) : null,
+    bodyText: textPartId
+      ? decodeMimeBodyPart(bodyParts?.get(textPartId) as Buffer | undefined, {
+          transferEncoding: textNode?.encoding,
+          charset: textNode?.parameters?.charset,
+        })
+      : null,
+    bodyHtml: htmlPartId
+      ? decodeMimeBodyPart(bodyParts?.get(htmlPartId) as Buffer | undefined, {
+          transferEncoding: htmlNode?.encoding,
+          charset: htmlNode?.parameters?.charset,
+        })
+      : null,
   };
 };
 
