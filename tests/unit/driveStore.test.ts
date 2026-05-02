@@ -62,6 +62,92 @@ const stubFetch = (fn: typeof fetch): void => {
   globalThis.fetch = fn;
 };
 
+describe("store/buildDriveStore ensureMailbox", () => {
+  beforeEach(() => {
+    process.env.APIS_BASE_URL = "https://app.example.test";
+    process.env.APIS_API_KEY = "api-key";
+    process.env.APIS_WORKSPACE_ID = "workspace-1";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("creates new mailboxes with segments-v1 storage and still runs init", async () => {
+    const createMailbox = vi.fn(async () => ({ mailboxId: "mail-w1", dbInode: "", drivePath: "" }));
+    const init = vi.fn(async () => ({ mailboxId: "mail-w1", schemaVersion: 2 }));
+    const store = {
+      listMailboxes: vi.fn(async () => []),
+      createMailbox,
+      mailbox: vi.fn(() => ({ init })),
+    };
+    const calls: Array<{ url: string | URL | Request; init?: RequestInit }> = [];
+    stubFetch(
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url, init });
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { mailbox_id: "mail-w1", db_inode: "", drive_path: "" },
+          }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    );
+
+    const drive = buildDriveStore(store as never);
+    const result = await drive.ensureMailbox("mail-w1", "w1@example.com");
+
+    expect(result.tag).toBe("Ok");
+    expect(createMailbox).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("https://app.example.test/v1/os/drive/api/v1");
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(calls[0]?.init?.headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-Api-Key": "api-key",
+      "X-Workspace-Id": "workspace-1",
+    });
+    expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
+      jsonrpc: "2.0",
+      method: "messages_store/create_mailbox",
+      params: {
+        mailbox_id: "mail-w1",
+        display_name: "w1@example.com",
+        storage_version: "segments-v1",
+      },
+    });
+    expect(init).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not recreate existing mailboxes, preserving sqlite-v1 mailboxes", async () => {
+    const createMailbox = vi.fn(async () => ({ mailboxId: "mail-w1", dbInode: "", drivePath: "" }));
+    const init = vi.fn(async () => ({ mailboxId: "mail-w1", schemaVersion: 1 }));
+    const store = {
+      listMailboxes: vi.fn(async () => [
+        {
+          mailboxId: "mail-w1",
+          displayName: "w1@example.com",
+          dbInode: "inode-1",
+          recordCount: 0,
+          sizeBytes: 0,
+          updatedAt: "2026-05-01T00:00:00.000Z",
+        },
+      ]),
+      createMailbox,
+      mailbox: vi.fn(() => ({ init })),
+    };
+
+    const drive = buildDriveStore(store as never);
+    const result = await drive.ensureMailbox("mail-w1", "w1@example.com");
+
+    expect(result.tag).toBe("Ok");
+    expect(createMailbox).not.toHaveBeenCalled();
+    expect(init).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("store/buildDriveStore attachment upload", () => {
   beforeEach(() => {
     process.env.APIS_BASE_URL = "https://app.example.test";

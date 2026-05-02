@@ -20,6 +20,12 @@ type FolderScoped = ReturnType<MailboxScoped["folder"]>;
 
 type AttachmentScoped = ReturnType<FolderScoped["message"]>["attachments"];
 
+type CreateMailboxJsonRpcResult = {
+  readonly mailbox_id?: string;
+  readonly db_inode?: string;
+  readonly drive_path?: string;
+};
+
 type IdempotentUploadStartResult = {
   readonly alreadyUploaded?: boolean;
   readonly intentId?: string | null;
@@ -123,6 +129,45 @@ const resolveUploadUrl = (uploadUrl: string): string => {
   return `${driveBase}${uploadUrl.startsWith("/") ? uploadUrl : `/${uploadUrl}`}`;
 };
 
+const jsonRpcAuthHeaders = (): Record<string, string> => ({
+  "Content-Type": "application/json",
+  ...uploadAuthHeaders(),
+});
+
+const createSegmentedMailbox = async (
+  mailboxId: string,
+  displayName: string,
+): Promise<CreateMailboxJsonRpcResult> => {
+  const response = await fetch(resolveDriveRpcUrl(), {
+    method: "POST",
+    headers: jsonRpcAuthHeaders(),
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "messages_store/create_mailbox",
+      params: {
+        mailbox_id: mailboxId,
+        display_name: displayName,
+        storage_version: "segments-v1",
+      },
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+  }
+  const payload = (await response.json()) as {
+    readonly error?: { readonly message?: string; readonly data?: unknown };
+    readonly result?: CreateMailboxJsonRpcResult;
+  };
+  if (payload.error !== undefined) {
+    throw new Error(payload.error.message ?? JSON.stringify(payload.error));
+  }
+  if (payload.result === undefined) {
+    throw new Error("missing JSON-RPC result");
+  }
+  return payload.result;
+};
+
 const uploadAuthHeaders = (): Record<string, string> => {
   const apiKey = process.env.APIS_API_KEY;
   if (apiKey === undefined || apiKey.length === 0) {
@@ -172,7 +217,7 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
     const exists = list.value.some((m) => m.mailboxId === mailboxId);
     if (!exists) {
       const create = await wrap("createMailbox", () =>
-        store.createMailbox({ mailboxId, displayName }),
+        createSegmentedMailbox(mailboxId, displayName),
       );
       if (create.tag === "Err") return create;
     }
