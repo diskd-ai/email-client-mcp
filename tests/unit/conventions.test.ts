@@ -7,13 +7,20 @@ import {
 } from "../../src/store/conventions.js";
 
 describe("store/conventions", () => {
-  /* REQUIREMENT end:comm/email-client-mcp/store/conventions -- mailboxId is a [a-z0-9-]{1,64} slug */
-  it("sanitizes account ids into a valid mailbox slug", () => {
-    expect(sanitizeMailboxId("Work@Acme.com")).toBe("work-acme-com");
-    expect(sanitizeMailboxId("---a__b!!c---")).toBe("a-b-c");
-    expect(sanitizeMailboxId("")).toBe("mailbox");
-    expect(sanitizeMailboxId("   ")).toBe("mailbox");
-    expect(sanitizeMailboxId("SAFE-id-1")).toBe("safe-id-1");
+  /* REQUIREMENT end:comm/email-client-mcp/store/conventions -- mailboxId is an Exchange-owned [a-z0-9-]{1,64} slug */
+  it("maps account ids into exchange-prefixed mailbox slugs", () => {
+    expect(sanitizeMailboxId("mail__w1upgraidefr")).toBe("exchange-mail-w1upgraidefr");
+    expect(sanitizeMailboxId("google__personal")).toBe("exchange-google-personal");
+    expect(sanitizeMailboxId("telegram__personal")).toBe("exchange-telegram-personal");
+    expect(sanitizeMailboxId("whatsapp__w1")).toBe("exchange-whatsapp-w1");
+    expect(sanitizeMailboxId("Work@Acme.com")).toBe("exchange-work-acme-com");
+    expect(sanitizeMailboxId("SAFE-id-1")).toBe("exchange-safe-id-1");
+  });
+
+  it("falls back to exchange-default and keeps already-prefixed slugs idempotent", () => {
+    expect(sanitizeMailboxId("")).toBe("exchange-default");
+    expect(sanitizeMailboxId("   ")).toBe("exchange-default");
+    expect(sanitizeMailboxId("exchange-google-personal")).toBe("exchange-google-personal");
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/store/conventions -- mailboxId truncates to 64 chars */

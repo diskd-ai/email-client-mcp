@@ -284,7 +284,7 @@ describe("sync/runSyncOnce", () => {
     expect(rep.error).toBeNull();
     expect(rep.folders).toHaveLength(1);
     expect(rep.folders[0]?.newMessages).toBe(3);
-    const stored = drive.folders.get("work")?.get("INBOX");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
     expect(stored?.messageIds.size).toBe(3);
     expect(stored?.messageIds.has("100:1")).toBe(true);
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(3);
@@ -312,7 +312,7 @@ describe("sync/runSyncOnce", () => {
     expect(rep.error).toBeNull();
     expect(uploadedAttachments).toEqual([
       {
-        mailboxId: "work",
+        mailboxId: "exchange-work",
         folderId: "INBOX",
         externalId: "14:94",
         attachmentId: "14:94:2",
@@ -323,7 +323,7 @@ describe("sync/runSyncOnce", () => {
         chunks: ["uid-94", "-part-2"],
       },
     ]);
-    const stored = drive.folders.get("work")?.get("INBOX");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
     const payload = stored?.payloads.get("14:94");
     expect(payload?.attachments[0]).toMatchObject({
       attachmentId: "14:94:2",
@@ -356,7 +356,7 @@ describe("sync/runSyncOnce", () => {
 
     expect(rep.error).toBeNull();
     expect(downloadDisposeCalls).toEqual(["94:2"]);
-    const stored = drive.folders.get("work")?.get("INBOX");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(94);
   });
 
@@ -386,7 +386,7 @@ describe("sync/runSyncOnce", () => {
     );
 
     expect(rep.error).toContain("upload failed");
-    const stored = drive.folders.get("work")?.get("INBOX");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
     expect(stored?.messageIds.has("14:94")).toBe(true);
     expect(stored?.messageIds.has("14:95")).toBe(true);
     // Drive requires the message row before attachment upload-start, so the
@@ -412,7 +412,7 @@ describe("sync/runSyncOnce", () => {
     });
     const rep = await runSyncOnce(deps, acct, watcherDefault);
     expect(rep.error).toContain("drive 503");
-    const stored = drive.folders.get("work")?.get("INBOX");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
     expect(stored?.messageIds.size).toBe(50);
     // Checkpoint reflects the last successful batch only.
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(50);
@@ -421,7 +421,7 @@ describe("sync/runSyncOnce", () => {
     const deps2 = buildFakeDeps(imap, drive);
     const rep2 = await runSyncOnce(deps2, acct, watcherDefault);
     expect(rep2.error).toBeNull();
-    const after = drive.folders.get("work")?.get("INBOX");
+    const after = drive.folders.get("exchange-work")?.get("INBOX");
     expect(after?.messageIds.size).toBe(75);
     expect((after?.metadata as unknown as SyncState).lastSyncedUid).toBe(75);
   });
@@ -437,7 +437,7 @@ describe("sync/runSyncOnce", () => {
       ]),
     };
     await runSyncOnce(buildFakeDeps(imap1, drive), acct, watcherDefault);
-    const before = drive.folders.get("work")?.get("INBOX");
+    const before = drive.folders.get("exchange-work")?.get("INBOX");
     expect(before?.messageIds.has("100:1")).toBe(true);
 
     // Second tick at UIDVALIDITY=200 (rollover).
@@ -447,7 +447,7 @@ describe("sync/runSyncOnce", () => {
     };
     const rep = await runSyncOnce(buildFakeDeps(imap2, drive), acct, watcherDefault);
     expect(rep.folders[0]?.uidValidityRolled).toBe(true);
-    const after = drive.folders.get("work")?.get("INBOX");
+    const after = drive.folders.get("exchange-work")?.get("INBOX");
     expect(after?.messageIds.has("100:1")).toBe(false);
     expect(after?.messageIds.has("200:1")).toBe(true);
     expect((after?.metadata as unknown as SyncState).uidValidity).toBe(200);
@@ -472,7 +472,7 @@ describe("sync/runSyncOnce", () => {
     };
     const rep = await runSyncOnce(buildFakeDeps(imap2, drive), acct, watcherDefault);
     expect(rep.folders[0]?.newMessages).toBe(1); // only UID 4 fetched
-    const stored = drive.folders.get("work")?.get("INBOX");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
     expect(stored?.messageIds.size).toBe(4);
   });
 
@@ -490,7 +490,7 @@ describe("sync/runSyncOnce", () => {
 
     expect(rep.error).toBeNull();
     expect(rep.folders[0]?.reconciledFlags).toBe(1);
-    const stored = drive.folders.get("work")?.get("INBOX")?.payloads.get("14:94");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX")?.payloads.get("14:94");
     expect(stored?.bodyText).toBe("body");
     expect(stored?.bodyHtml).toBeNull();
     expect(stored?.snippet).toBe("body");
@@ -511,7 +511,7 @@ describe("sync/runSyncOnce", () => {
       ]),
     };
     await runSyncOnce(buildFakeDeps(imap1, drive), acct, watcherDefault);
-    expect(drive.folders.get("work")?.has("Archive")).toBe(true);
+    expect(drive.folders.get("exchange-work")?.has("Archive")).toBe(true);
 
     // Second tick: Archive is gone.
     const imap2: FakeImapState = {
@@ -520,7 +520,7 @@ describe("sync/runSyncOnce", () => {
     };
     const rep = await runSyncOnce(buildFakeDeps(imap2, drive), acct, watcherDefault);
     expect(rep.prunedFolders).toBe(1);
-    expect(drive.folders.get("work")?.has("Archive")).toBe(false);
+    expect(drive.folders.get("exchange-work")?.has("Archive")).toBe(false);
   });
 });
 

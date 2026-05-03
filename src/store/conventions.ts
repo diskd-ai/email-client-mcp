@@ -5,20 +5,24 @@
  */
 
 const MAILBOX_ID_RE = /^[a-z0-9-]{1,64}$/;
+const EXCHANGE_MAILBOX_PREFIX = "exchange-";
 
 /**
- * Sanitize an account id for use as a Drive mailbox id (slug subset
- * `[a-z0-9-]{1,64}`). Lowercase, replace anything else with `-`, collapse
- * runs, trim leading/trailing dashes, truncate. Empty input -> 'mailbox'.
+ * Map an account id to the Exchange-owned Drive mailbox id namespace.
+ * Lowercase, replace anything else with `-`, collapse runs, trim
+ * leading/trailing dashes, then prefix with `exchange-`.
+ * Empty input -> `exchange-default`.
  */
 export const sanitizeMailboxId = (raw: string): string => {
-  const lowered = raw
+  const slug = raw
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
-  const truncated = lowered.slice(0, 64);
-  return truncated.length === 0 ? "mailbox" : truncated;
+  if (slug.startsWith(EXCHANGE_MAILBOX_PREFIX)) return slug.slice(0, 64);
+  const maxSlugLength = 64 - EXCHANGE_MAILBOX_PREFIX.length;
+  const truncated = slug.slice(0, maxSlugLength);
+  return `${EXCHANGE_MAILBOX_PREFIX}${truncated.length === 0 ? "default" : truncated}`;
 };
 
 /**
