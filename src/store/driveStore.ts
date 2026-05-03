@@ -192,20 +192,43 @@ const isAlreadyUploadedStart = (start: IdempotentUploadStartResult): boolean =>
   start.alreadyUploaded === true ||
   (start.intentId === "already-uploaded" && start.uploadUrl === "already-uploaded://attachment");
 
+type ExistingAttachment = {
+  readonly attachmentId: string;
+  readonly filename: string;
+  readonly contentType: string;
+  readonly sizeBytes: number;
+  readonly driveInode: string;
+  readonly createdAt: string;
+};
+
+const GENERIC_CONTENT_TYPES = new Set(["application/octet-stream", "binary/octet-stream"]);
+
+const normalizeContentType = (value: string): string => value.trim().toLowerCase();
+
+const contentTypesCompatible = (left: string, right: string): boolean => {
+  const normalizedLeft = normalizeContentType(left);
+  const normalizedRight = normalizeContentType(right);
+  return (
+    normalizedLeft === normalizedRight ||
+    GENERIC_CONTENT_TYPES.has(normalizedLeft) ||
+    GENERIC_CONTENT_TYPES.has(normalizedRight)
+  );
+};
+
 const matchExistingAttachment = (
-  existing: {
-    readonly attachmentId: string;
-    readonly filename: string;
-    readonly contentType: string;
-    readonly sizeBytes: number;
-    readonly driveInode: string;
-  },
+  existing: ExistingAttachment,
   expected: UploadAttachmentInput,
 ): boolean =>
   existing.attachmentId === expected.attachmentId &&
   existing.filename === expected.filename &&
-  existing.contentType === expected.contentType &&
+  contentTypesCompatible(existing.contentType, expected.contentType) &&
   existing.sizeBytes === expected.sizeBytes;
+
+const toUploadAttachmentResult = (existing: ExistingAttachment): UploadAttachmentResult => ({
+  attachmentId: existing.attachmentId,
+  storedSizeBytes: existing.sizeBytes,
+  storedAt: existing.createdAt,
+});
 
 export const buildDriveStore = (store: MessagesStore): DriveStore => ({
   async ensureMailbox(mailboxId, displayName) {
@@ -289,44 +312,48 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
   },
   async uploadAttachment(mailboxId, folderId, externalId, attachment, content) {
     const attachments = attachmentScoped(store, mailboxId, folderId, externalId);
-    const existingResult = async (): Promise<Result<DriveError, UploadAttachmentResult>> => {
+    const getExistingAttachment = async (): Promise<ExistingAttachment> => {
       const listed = await attachments.list();
       const existing = listed.find((item) => item.attachmentId === attachment.attachmentId);
       if (existing === undefined) {
-        return Err(
-          driveError(
-            `attachment conflict but existing row was not found: ${attachment.attachmentId}`,
-          ),
+        throw new Error(
+          `attachment conflict but existing row was not found: ${attachment.attachmentId}`,
         );
       }
-      if (!matchExistingAttachment(existing, attachment)) {
-        return Err(
-          driveError(`attachment conflict with mismatched metadata: ${attachment.attachmentId}`),
-        );
+      return existing;
+    };
+
+    const deleteExistingAttachment = async (): Promise<void> => {
+      await attachments.delete({ attachmentId: attachment.attachmentId, autoCommit: false });
+    };
+
+    const uploadStart = async (): Promise<IdempotentUploadStartResult> =>
+      (await attachments.uploadStart({
+        attachmentId: attachment.attachmentId,
+        filename: attachment.filename,
+        contentType: attachment.contentType,
+        sizeBytes: attachment.sizeBytes,
+        autoCommit: false,
+      })) as IdempotentUploadStartResult;
+
+    const resolveConflictBeforeUpload = async (): Promise<UploadAttachmentResult | null> => {
+      const existing = await getExistingAttachment();
+      if (matchExistingAttachment(existing, attachment)) {
+        return toUploadAttachmentResult(existing);
       }
-      return Ok({
-        attachmentId: existing.attachmentId,
-        storedSizeBytes: existing.sizeBytes,
-        storedAt: existing.createdAt,
-      });
+      await deleteExistingAttachment();
+      return null;
     };
 
     return await wrap("attachment.upload", async () => {
       let start: IdempotentUploadStartResult;
       try {
-        start = (await attachments.uploadStart({
-          attachmentId: attachment.attachmentId,
-          filename: attachment.filename,
-          contentType: attachment.contentType,
-          sizeBytes: attachment.sizeBytes,
-          autoCommit: false,
-        })) as IdempotentUploadStartResult;
+        start = await uploadStart();
       } catch (cause) {
         if (!isConflict(cause)) throw cause;
-        const existing = await existingResult();
-        if (existing.tag === "Err")
-          throw new Error(existing.error.message, { cause: existing.error });
-        return existing.value;
+        const existing = await resolveConflictBeforeUpload();
+        if (existing !== null) return existing;
+        start = await uploadStart();
       }
       if (isAlreadyUploadedStart(start)) {
         if (start.attachmentId && start.sizeBytes !== undefined && start.createdAt) {
@@ -336,14 +363,17 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
             storedAt: start.createdAt,
           };
         }
-        const existing = await existingResult();
-        if (existing.tag === "Err")
-          throw new Error(existing.error.message, { cause: existing.error });
-        return existing.value;
+        const existing = await resolveConflictBeforeUpload();
+        if (existing !== null) return existing;
+        start = await uploadStart();
+      }
+      if (isAlreadyUploadedStart(start)) {
+        return toUploadAttachmentResult(await getExistingAttachment());
       }
       if (!start.intentId || !start.uploadUrl) {
         throw new Error("attachment.uploadStart response missing upload intent");
       }
+      const intentId = start.intentId;
       const uploadUrl = resolveUploadUrl(start.uploadUrl);
       const put = await fetch(uploadUrl, {
         method: "PUT",
@@ -365,10 +395,10 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
       if (!etag) {
         throw new Error("Upload PUT response missing etag");
       }
-      try {
+      const commitUpload = async (): Promise<UploadAttachmentResult> => {
         const commit = await attachments.uploadCommit({
           attachmentId: attachment.attachmentId,
-          intentId: start.intentId,
+          intentId,
           etag,
           autoCommit: false,
         });
@@ -377,12 +407,17 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
           storedSizeBytes: commit.sizeBytes,
           storedAt: new Date().toISOString(),
         };
+      };
+      try {
+        return await commitUpload();
       } catch (cause) {
         if (!isConflict(cause)) throw cause;
-        const existing = await existingResult();
-        if (existing.tag === "Err")
-          throw new Error(existing.error.message, { cause: existing.error });
-        return existing.value;
+        const existing = await getExistingAttachment();
+        if (matchExistingAttachment(existing, attachment)) {
+          return toUploadAttachmentResult(existing);
+        }
+        await deleteExistingAttachment();
+        return await commitUpload();
       }
     });
   },

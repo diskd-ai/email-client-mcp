@@ -9,13 +9,22 @@ const chunks = async function* (): AsyncIterable<Uint8Array> {
 
 const buildStore = (options?: {
   readonly commitConflict?: boolean;
+  readonly commitConflictOnce?: boolean;
+  readonly uploadStartConflictOnce?: boolean;
   readonly listedSize?: number;
+  readonly listedContentType?: string;
   readonly alreadyUploaded?: boolean;
   readonly sentinelAlreadyUploaded?: boolean;
 }) => {
+  let uploadStartCalls = 0;
+  let uploadCommitCalls = 0;
   const attachments = {
-    uploadStart: vi.fn(async () =>
-      options?.alreadyUploaded
+    uploadStart: vi.fn(async () => {
+      uploadStartCalls += 1;
+      if (options?.uploadStartConflictOnce === true && uploadStartCalls === 1) {
+        throw new Error("JSON-RPC error: CONFLICT");
+      }
+      return options?.alreadyUploaded
         ? {
             alreadyUploaded: true,
             intentId: null,
@@ -29,22 +38,29 @@ const buildStore = (options?: {
               intentId: "already-uploaded",
               uploadUrl: "already-uploaded://attachment",
             }
-          : { alreadyUploaded: false, intentId: "intent-1", uploadUrl: "/api/v1/drive/upload" },
-    ),
+          : { alreadyUploaded: false, intentId: "intent-1", uploadUrl: "/api/v1/drive/upload" };
+    }),
     uploadCommit: vi.fn(async () => {
-      if (options?.commitConflict) throw new Error("JSON-RPC error: CONFLICT");
+      uploadCommitCalls += 1;
+      if (
+        options?.commitConflict ||
+        (options?.commitConflictOnce === true && uploadCommitCalls === 1)
+      ) {
+        throw new Error("JSON-RPC error: CONFLICT");
+      }
       return { attachmentId: "14:94:2", driveInode: "inode-new", sizeBytes: 11 };
     }),
     list: vi.fn(async () => [
       {
         attachmentId: "14:94:2",
         filename: "report.pdf",
-        contentType: "application/pdf",
+        contentType: options?.listedContentType ?? "application/pdf",
         sizeBytes: options?.listedSize ?? 11,
         driveInode: "inode-existing",
         createdAt: "2026-04-29T10:00:00.000Z",
       },
     ]),
+    delete: vi.fn(async () => ({ deleted: true })),
   };
   const store = {
     mailbox: vi.fn(() => ({
@@ -312,8 +328,8 @@ describe("store/buildDriveStore attachment upload", () => {
     }
   });
 
-  it("fails duplicate attachment commit when existing metadata differs", async () => {
-    const { store } = buildStore({ commitConflict: true, listedSize: 12 });
+  it("overwrites an existing attachment when upload-start reports conflicting metadata", async () => {
+    const { store, attachments } = buildStore({ uploadStartConflictOnce: true, listedSize: 12 });
     stubFetch(
       vi.fn(
         async () => new Response(JSON.stringify({ etag: "etag-1" }), { status: 200 }),
@@ -335,9 +351,74 @@ describe("store/buildDriveStore attachment upload", () => {
       chunks(),
     );
 
-    expect(result.tag).toBe("Err");
-    if (result.tag === "Err") {
-      expect(result.error.message).toContain("mismatched metadata");
-    }
+    expect(result.tag).toBe("Ok");
+    expect(attachments.delete).toHaveBeenCalledWith({
+      attachmentId: "14:94:2",
+      autoCommit: false,
+    });
+    expect(attachments.uploadStart).toHaveBeenCalledTimes(2);
+    expect(attachments.uploadCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it("overwrites an existing attachment when upload-commit reports conflicting metadata", async () => {
+    const { store, attachments } = buildStore({ commitConflictOnce: true, listedSize: 12 });
+    stubFetch(
+      vi.fn(
+        async () => new Response(JSON.stringify({ etag: "etag-1" }), { status: 200 }),
+      ) as typeof fetch,
+    );
+
+    const drive = buildDriveStore(store as never);
+    const result = await drive.uploadAttachment(
+      "mail-w1",
+      "INBOX",
+      "14:94",
+      {
+        attachmentId: "14:94:2",
+        partId: "2",
+        filename: "report.pdf",
+        contentType: "application/pdf",
+        sizeBytes: 11,
+      },
+      chunks(),
+    );
+
+    expect(result.tag).toBe("Ok");
+    expect(attachments.delete).toHaveBeenCalledWith({
+      attachmentId: "14:94:2",
+      autoCommit: false,
+    });
+    expect(attachments.uploadCommit).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps generic MIME retries idempotent without overwriting", async () => {
+    const { store, attachments } = buildStore({
+      commitConflict: true,
+      listedContentType: "application/octet-stream",
+    });
+    stubFetch(
+      vi.fn(
+        async () => new Response(JSON.stringify({ etag: "etag-1" }), { status: 200 }),
+      ) as typeof fetch,
+    );
+
+    const drive = buildDriveStore(store as never);
+    const result = await drive.uploadAttachment(
+      "mail-w1",
+      "INBOX",
+      "14:94",
+      {
+        attachmentId: "14:94:2",
+        partId: "2",
+        filename: "report.pdf",
+        contentType: "application/pdf",
+        sizeBytes: 11,
+      },
+      chunks(),
+    );
+
+    expect(result.tag).toBe("Ok");
+    expect(attachments.delete).not.toHaveBeenCalled();
+    expect(attachments.uploadCommit).toHaveBeenCalledTimes(1);
   });
 });
