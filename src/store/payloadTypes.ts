@@ -73,14 +73,20 @@ export type StoredEmailPayload = {
  *  - `uidValidity`: snapshot of last seen UIDVALIDITY; mismatch triggers
  *    a full folder drop+resync.
  *  - `uidNext`: snapshot of last seen UIDNEXT; the head of the sync window.
- *  - `lastSyncedUid`: highest UID confirmed written via successful upsert.
- *    `runSyncOnce` advances this only after a batch upsert returns Ok.
+ *  - `forwardSyncedUid`: highest UID confirmed written for the new-mail
+ *    forward cursor.
+ *  - `backfillBeforeUid`: lowest UID covered by historical backfill. A
+ *    non-null value means older messages below this UID are still pending.
+ *  - `lastSyncedUid`: compatibility mirror of `forwardSyncedUid` for old
+ *    metadata readers and old folder states.
  *  - `lastSyncStartedAt` / `lastSyncFinishedAt` / `lastSyncError`:
  *    diagnostic snapshot exposed via `get_watcher_status`.
  */
 export type SyncState = {
   readonly uidValidity: number;
   readonly uidNext: number;
+  readonly forwardSyncedUid: number;
+  readonly backfillBeforeUid: number | null;
   readonly lastSyncedUid: number;
   readonly lastSyncStartedAt: string | null;
   readonly lastSyncFinishedAt: string | null;

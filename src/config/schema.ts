@@ -55,6 +55,12 @@ const bodyHydrationSchema = z.object({
   skip_all_mail: z.boolean().default(true),
 });
 
+const recentFirstSchema = z.object({
+  enabled: z.boolean().default(true),
+  initial_recent_window: z.number().int().min(1).default(1000),
+  backfill_window_per_tick: z.number().int().min(0).default(500),
+});
+
 const watcherSchema = z.object({
   enabled: z.boolean().default(true),
   interval_ms: z.number().int().min(60_000).default(60_000),
@@ -64,6 +70,11 @@ const watcherSchema = z.object({
     enabled: true,
     max_messages_per_tick: 50,
     skip_all_mail: true,
+  }),
+  recent_first: recentFirstSchema.default({
+    enabled: true,
+    initial_recent_window: 1000,
+    backfill_window_per_tick: 500,
   }),
 });
 
@@ -90,6 +101,11 @@ export const configSchema = z.object({
       enabled: true,
       max_messages_per_tick: 50,
       skip_all_mail: true,
+    },
+    recent_first: {
+      enabled: true,
+      initial_recent_window: 1000,
+      backfill_window_per_tick: 500,
     },
   }),
 });

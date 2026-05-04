@@ -20,10 +20,15 @@ import { runSyncOnce, type SyncDeps, type SyncReport } from "./sync.js";
 export type WatcherFolderStatus = {
   readonly folderId: string;
   readonly newMessages: number;
+  readonly forwardMessages: number;
+  readonly backfilledMessages: number;
   readonly reconciledFlags: number;
   readonly hydratedBodies: number;
   readonly bodyHydrationErrors: number;
   readonly uidValidityRolled: boolean;
+  readonly forwardSyncedUid: number | null;
+  readonly backfillBeforeUid: number | null;
+  readonly backfillComplete: boolean;
   readonly error: string | null;
 };
 
@@ -58,10 +63,15 @@ const reportToStatus = (rep: SyncReport): WatcherAccountStatus => ({
   folders: rep.folders.map((f) => ({
     folderId: f.folderId,
     newMessages: f.newMessages,
+    forwardMessages: f.forwardMessages ?? f.newMessages,
+    backfilledMessages: f.backfilledMessages ?? 0,
     reconciledFlags: f.reconciledFlags,
     hydratedBodies: f.hydratedBodies,
     bodyHydrationErrors: f.bodyHydrationErrors,
     uidValidityRolled: f.uidValidityRolled,
+    forwardSyncedUid: f.forwardSyncedUid ?? null,
+    backfillBeforeUid: f.backfillBeforeUid ?? null,
+    backfillComplete: f.backfillComplete ?? true,
     error: f.error,
   })),
 });

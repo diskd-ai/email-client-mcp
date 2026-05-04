@@ -124,10 +124,15 @@ export type SyncDeps = {
 export type SyncFolderReport = {
   readonly folderId: string;
   readonly newMessages: number;
+  readonly forwardMessages?: number;
+  readonly backfilledMessages?: number;
   readonly reconciledFlags: number;
   readonly hydratedBodies: number;
   readonly bodyHydrationErrors: number;
   readonly uidValidityRolled: boolean;
+  readonly forwardSyncedUid?: number | null;
+  readonly backfillBeforeUid?: number | null;
+  readonly backfillComplete?: boolean;
   readonly error: string | null;
 };
 
@@ -140,19 +145,52 @@ export type SyncReport = {
   readonly error: string | null;
 };
 
-const parseSyncState = (raw: Readonly<Record<string, unknown>> | null): SyncState | null => {
+type ParsedSyncState = {
+  readonly state: SyncState;
+  readonly source: "v2" | "legacy";
+};
+
+const parseSyncState = (raw: Readonly<Record<string, unknown>> | null): ParsedSyncState | null => {
   if (raw === null) return null;
   const uv = raw.uidValidity;
   const un = raw.uidNext;
-  const ls = raw.lastSyncedUid;
-  if (typeof uv !== "number" || typeof un !== "number" || typeof ls !== "number") return null;
+  if (typeof uv !== "number" || typeof un !== "number") return null;
+
+  const forward = raw.forwardSyncedUid;
+  if (typeof forward === "number") {
+    const backfill = raw.backfillBeforeUid;
+    const lastSyncedUid = typeof raw.lastSyncedUid === "number" ? raw.lastSyncedUid : forward;
+    return {
+      source: "v2",
+      state: {
+        uidValidity: uv,
+        uidNext: un,
+        forwardSyncedUid: forward,
+        backfillBeforeUid: typeof backfill === "number" ? backfill : null,
+        lastSyncedUid,
+        lastSyncStartedAt: typeof raw.lastSyncStartedAt === "string" ? raw.lastSyncStartedAt : null,
+        lastSyncFinishedAt:
+          typeof raw.lastSyncFinishedAt === "string" ? raw.lastSyncFinishedAt : null,
+        lastSyncError: typeof raw.lastSyncError === "string" ? raw.lastSyncError : null,
+      },
+    };
+  }
+
+  const legacyLastSynced = raw.lastSyncedUid;
+  if (typeof legacyLastSynced !== "number") return null;
   return {
-    uidValidity: uv,
-    uidNext: un,
-    lastSyncedUid: ls,
-    lastSyncStartedAt: typeof raw.lastSyncStartedAt === "string" ? raw.lastSyncStartedAt : null,
-    lastSyncFinishedAt: typeof raw.lastSyncFinishedAt === "string" ? raw.lastSyncFinishedAt : null,
-    lastSyncError: typeof raw.lastSyncError === "string" ? raw.lastSyncError : null,
+    source: "legacy",
+    state: {
+      uidValidity: uv,
+      uidNext: un,
+      forwardSyncedUid: legacyLastSynced,
+      backfillBeforeUid: null,
+      lastSyncedUid: legacyLastSynced,
+      lastSyncStartedAt: typeof raw.lastSyncStartedAt === "string" ? raw.lastSyncStartedAt : null,
+      lastSyncFinishedAt:
+        typeof raw.lastSyncFinishedAt === "string" ? raw.lastSyncFinishedAt : null,
+      lastSyncError: typeof raw.lastSyncError === "string" ? raw.lastSyncError : null,
+    },
   };
 };
 
@@ -160,6 +198,15 @@ const range = (lo: number, hi: number): readonly [number, number][] => {
   const out: [number, number][] = [];
   for (let from = lo; from <= hi; from += BATCH_SIZE) {
     const to = Math.min(from + BATCH_SIZE - 1, hi);
+    out.push([from, to]);
+  }
+  return out;
+};
+
+const descendingRange = (lo: number, hi: number): readonly [number, number][] => {
+  const out: [number, number][] = [];
+  for (let to = hi; to >= lo; to -= BATCH_SIZE) {
+    const from = Math.max(lo, to - BATCH_SIZE + 1);
     out.push([from, to]);
   }
   return out;
@@ -191,6 +238,33 @@ const bodyHydrationEnabledForFolder = (
   if (settings.skip_all_mail && isAllMailFolder(folderPath, specialUse)) return false;
   return true;
 };
+
+const folderPriority = (folderPath: string, specialUse: string | null): number => {
+  const normalized = folderPath.toLowerCase();
+  if (specialUse === "\\Inbox" || normalized === "inbox") return 0;
+  if (specialUse === "\\Sent" || /(?:^|\/)sent$/i.test(folderPath)) return 1;
+  if (specialUse === "\\Flagged" || /(?:^|\/)(important|starred)$/i.test(folderPath)) {
+    return 2;
+  }
+  if (isAllMailFolder(folderPath, specialUse)) return 5;
+  return 4;
+};
+
+const sortFoldersByPriority = <
+  T extends { readonly path: string; readonly specialUse: string | null },
+>(
+  folders: readonly T[],
+): readonly T[] =>
+  folders
+    .map((folder, index) => ({ folder, index }))
+    .sort((a, b) => {
+      const byPriority =
+        folderPriority(a.folder.path, a.folder.specialUse) -
+        folderPriority(b.folder.path, b.folder.specialUse);
+      if (byPriority !== 0) return byPriority;
+      return a.index - b.index;
+    })
+    .map(({ folder }) => folder);
 
 /**
  * Sync one folder. Returns the per-folder report; never throws.
@@ -237,8 +311,11 @@ const syncFolder = async (
       error: errorMessage(existing.error),
     };
   }
-  let state = parseSyncState(existing.value?.metadata ?? null);
+  let parsedState = parseSyncState(existing.value?.metadata ?? null);
+  let state = parsedState?.state ?? null;
   let uidValidityRolled = false;
+  const latestUid = status.uidNext - 1;
+  const recentFirst = watcher.recent_first;
 
   // UIDVALIDITY rollover: drop the folder and start over.
   if (state !== null && state.uidValidity !== status.uidValidity) {
@@ -255,24 +332,31 @@ const syncFolder = async (
         error: errorMessage(del.error),
       };
     }
+    parsedState = null;
     state = null;
   }
 
-  const fromUid = (state?.lastSyncedUid ?? 0) + 1;
-  const toUid = status.uidNext - 1;
-
-  let lastSynced = state?.lastSyncedUid ?? 0;
   let newMessages = 0;
+  let forwardMessages = 0;
+  let backfilledMessages = 0;
 
   // Initial folder upsert with fresh metadata. We rewrite metadata at
   // each successful batch so the on-disk checkpoint mirrors progress.
   const writeState = async (next: SyncState): Promise<Result<AppError, void>> =>
     deps.drive.upsertFolder(mailboxId, folderId, folderId, next);
 
+  const recentFrom = Math.max(1, status.uidNext - recentFirst.initial_recent_window);
+  const needsRecentBootstrap =
+    recentFirst.enabled &&
+    latestUid >= 1 &&
+    (state === null || (parsedState?.source === "legacy" && state.forwardSyncedUid < latestUid));
+
   if (state === null) {
     const init: SyncState = {
       uidValidity: status.uidValidity,
       uidNext: status.uidNext,
+      forwardSyncedUid: 0,
+      backfillBeforeUid: needsRecentBootstrap && recentFrom > 1 ? recentFrom : null,
       lastSyncedUid: 0,
       lastSyncStartedAt: startIso,
       lastSyncFinishedAt: null,
@@ -292,12 +376,15 @@ const syncFolder = async (
     }
     state = init;
   } else {
-    const w = await writeState({
+    state = {
       ...state,
       uidNext: status.uidNext,
+      backfillBeforeUid:
+        needsRecentBootstrap && recentFrom > 1 ? recentFrom : state.backfillBeforeUid,
       lastSyncStartedAt: startIso,
       lastSyncError: null,
-    });
+    };
+    const w = await writeState(state);
     if (w.tag === "Err") {
       return {
         folderId,
@@ -311,40 +398,56 @@ const syncFolder = async (
     }
   }
 
-  if (toUid >= fromUid) {
-    const finishWithError = async (error: AppError): Promise<SyncFolderReport> => {
-      const w = await writeState({
-        ...(state as SyncState),
-        uidValidity: status.uidValidity,
-        uidNext: status.uidNext,
-        lastSyncedUid: lastSynced,
-        lastSyncError: errorMessage(error),
-        lastSyncFinishedAt: deps.now().toISOString(),
-      });
-      if (w.tag === "Err") {
-        return {
-          folderId,
-          newMessages,
-          reconciledFlags: 0,
-          hydratedBodies,
-          bodyHydrationErrors,
-          uidValidityRolled,
-          error: errorMessage(w.error),
-        };
-      }
+  const finishWithError = async (error: AppError): Promise<SyncFolderReport> => {
+    const erroredState: SyncState = {
+      ...(state as SyncState),
+      uidValidity: status.uidValidity,
+      uidNext: status.uidNext,
+      lastSyncError: errorMessage(error),
+      lastSyncFinishedAt: deps.now().toISOString(),
+    };
+    const w = await writeState(erroredState);
+    if (w.tag === "Err") {
       return {
         folderId,
         newMessages,
+        forwardMessages,
+        backfilledMessages,
         reconciledFlags: 0,
         hydratedBodies,
         bodyHydrationErrors,
         uidValidityRolled,
-        error: errorMessage(error),
+        forwardSyncedUid: state?.forwardSyncedUid ?? null,
+        backfillBeforeUid: state?.backfillBeforeUid ?? null,
+        backfillComplete: state?.backfillBeforeUid === null,
+        error: errorMessage(w.error),
       };
+    }
+    state = erroredState;
+    return {
+      folderId,
+      newMessages,
+      forwardMessages,
+      backfilledMessages,
+      reconciledFlags: 0,
+      hydratedBodies,
+      bodyHydrationErrors,
+      uidValidityRolled,
+      forwardSyncedUid: state.forwardSyncedUid,
+      backfillBeforeUid: state.backfillBeforeUid,
+      backfillComplete: state.backfillBeforeUid === null,
+      error: errorMessage(error),
     };
+  };
 
-    for (const [batchFrom, batchTo] of range(fromUid, toUid)) {
+  const processMetadataRanges = async (
+    rangesToProcess: readonly [number, number][],
+    mode: "forward" | "backfill",
+    hydrateBodies: boolean,
+  ): Promise<SyncFolderReport | null> => {
+    for (const [batchFrom, batchTo] of rangesToProcess) {
       let sawMessageInBatch = false;
+      let durableUid = mode === "forward" ? batchFrom - 1 : batchTo + 1;
       try {
         for await (const imapMessage of deps.imap.fetchMetadataRange(
           account.name,
@@ -375,11 +478,14 @@ const syncFolder = async (
             return await finishWithError(upsert.error);
           }
 
-          newMessages += upsert.value.inserted + upsert.value.updated;
-          if (bodyHydrationEnabledForFolder(watcher, folderPath, specialUse)) {
+          const changed = upsert.value.inserted + upsert.value.updated;
+          newMessages += changed;
+          if (mode === "forward") forwardMessages += changed;
+          else backfilledMessages += changed;
+          if (hydrateBodies && bodyHydrationEnabledForFolder(watcher, folderPath, specialUse)) {
             bodyHydrationCandidates.push({ mailboxId, folderId, externalId });
           }
-          lastSynced = uid;
+          durableUid = uid;
         }
       } catch (cause) {
         const e = imapError(account.name, `fetch UID ${batchFrom}:${batchTo}`, cause);
@@ -387,34 +493,87 @@ const syncFolder = async (
       }
 
       if (!sawMessageInBatch) {
-        // Range was empty -- advance the checkpoint to the batch top
-        // anyway, we now know there is nothing to fetch in there.
-        lastSynced = batchTo;
+        // Range was empty -- advance the checkpoint anyway; we now know
+        // there is nothing to fetch in that range.
+        durableUid = mode === "forward" ? batchTo : batchFrom;
       }
 
-      // Checkpoint: write once after the batch, but the value is the
-      // highest UID whose metadata payload is durable.
-      const checkpoint: SyncState = {
-        ...(state as SyncState),
-        uidValidity: status.uidValidity,
-        uidNext: status.uidNext,
-        lastSyncedUid: lastSynced,
-        lastSyncFinishedAt: deps.now().toISOString(),
-        lastSyncError: null,
-      };
+      const checkpoint: SyncState =
+        mode === "forward"
+          ? {
+              ...(state as SyncState),
+              uidValidity: status.uidValidity,
+              uidNext: status.uidNext,
+              forwardSyncedUid: durableUid,
+              lastSyncedUid: durableUid,
+              lastSyncFinishedAt: deps.now().toISOString(),
+              lastSyncError: null,
+            }
+          : {
+              ...(state as SyncState),
+              uidValidity: status.uidValidity,
+              uidNext: status.uidNext,
+              backfillBeforeUid: batchFrom > 1 ? batchFrom : null,
+              lastSyncFinishedAt: deps.now().toISOString(),
+              lastSyncError: null,
+            };
       const w = await writeState(checkpoint);
       if (w.tag === "Err") {
         return {
           folderId,
           newMessages,
+          forwardMessages,
+          backfilledMessages,
           reconciledFlags: 0,
           hydratedBodies,
           bodyHydrationErrors,
           uidValidityRolled,
+          forwardSyncedUid: state?.forwardSyncedUid ?? null,
+          backfillBeforeUid: state?.backfillBeforeUid ?? null,
+          backfillComplete: state?.backfillBeforeUid === null,
           error: errorMessage(w.error),
         };
       }
       state = checkpoint;
+    }
+    return null;
+  };
+
+  if (latestUid >= 1) {
+    if (needsRecentBootstrap) {
+      const bootstrapError = await processMetadataRanges(
+        range(recentFrom, latestUid),
+        "forward",
+        true,
+      );
+      if (bootstrapError !== null) return bootstrapError;
+    } else if (latestUid > state.forwardSyncedUid) {
+      const forwardError = await processMetadataRanges(
+        range(state.forwardSyncedUid + 1, latestUid),
+        "forward",
+        true,
+      );
+      if (forwardError !== null) return forwardError;
+    }
+
+    if (
+      !needsRecentBootstrap &&
+      recentFirst.enabled &&
+      recentFirst.backfill_window_per_tick > 0 &&
+      state.backfillBeforeUid !== null &&
+      state.backfillBeforeUid > 1
+    ) {
+      const backfillTo = state.backfillBeforeUid - 1;
+      const backfillFrom = Math.max(
+        1,
+        state.backfillBeforeUid - recentFirst.backfill_window_per_tick,
+      );
+      const backfillError = await processMetadataRanges(
+        descendingRange(backfillFrom, backfillTo),
+        "backfill",
+        false,
+      );
+      if (backfillError !== null) return backfillError;
     }
   }
 
@@ -439,8 +598,9 @@ const syncFolder = async (
 
   // Sliding-window flag reconciliation. Bounds drift to flagWindow UIDs.
   let reconciledFlags = 0;
-  if (flagWindow > 0 && lastSynced > 0) {
-    const reconFrom = Math.max(1, lastSynced - flagWindow + 1);
+  if (flagWindow > 0 && state.forwardSyncedUid > 0) {
+    const reconTo = state.forwardSyncedUid;
+    const reconFrom = Math.max(1, reconTo - flagWindow + 1);
     try {
       const updated: StoredEmailPayload[] = [];
       const updatedIds: string[] = [];
@@ -448,7 +608,7 @@ const syncFolder = async (
         account.name,
         folderPath,
         reconFrom,
-        lastSynced,
+        reconTo,
       )) {
         const incoming = toStoredPayload(env, {
           accountId: account.name,
@@ -509,10 +669,15 @@ const syncFolder = async (
   return {
     folderId,
     newMessages,
+    forwardMessages,
+    backfilledMessages,
     reconciledFlags,
     hydratedBodies,
     bodyHydrationErrors,
     uidValidityRolled,
+    forwardSyncedUid: state.forwardSyncedUid,
+    backfillBeforeUid: state.backfillBeforeUid,
+    backfillComplete: state.backfillBeforeUid === null,
     error: null,
   };
 };
@@ -556,11 +721,13 @@ export const runSyncOnce = async (
     };
   }
   const allFolders = foldersR.value;
-  const filteredFolders = (() => {
-    if (watcher.folders === undefined || watcher.folders.length === 0) return allFolders;
-    const allow = new Set(watcher.folders);
-    return allFolders.filter((f) => allow.has(f.path));
-  })();
+  const filteredFolders = sortFoldersByPriority(
+    (() => {
+      if (watcher.folders === undefined || watcher.folders.length === 0) return allFolders;
+      const allow = new Set(watcher.folders);
+      return allFolders.filter((f) => allow.has(f.path));
+    })(),
+  );
 
   const reports: SyncFolderReport[] = [];
   for (const f of filteredFolders) {

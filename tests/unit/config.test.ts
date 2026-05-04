@@ -20,6 +20,17 @@ describe("config/schema", () => {
     });
   });
 
+  /* REQUIREMENT end:comm/email-client-mcp/config -- watcher recent-first sync has bounded safe defaults */
+  it("defaults watcher recent-first sync settings", () => {
+    const parsed = configSchema.parse({ accounts: [account] });
+
+    expect(parsed.watcher.recent_first).toEqual({
+      enabled: true,
+      initial_recent_window: 1000,
+      backfill_window_per_tick: 500,
+    });
+  });
+
   it("allows disabling eager body hydration", () => {
     const parsed = configSchema.parse({
       accounts: [account],

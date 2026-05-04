@@ -19,6 +19,7 @@ const watcherDefault: WatcherSettings = {
   interval_ms: 60_000,
   flag_reconcile_window: 0,
   body_hydration: { enabled: false, max_messages_per_tick: 50, skip_all_mail: true },
+  recent_first: { enabled: true, initial_recent_window: 1000, backfill_window_per_tick: 500 },
 };
 
 const watcherWithBodyHydration = (maxMessagesPerTick = 50): WatcherSettings => ({
@@ -312,6 +313,187 @@ describe("sync/runSyncOnce", () => {
     expect(stored?.messageIds.size).toBe(3);
     expect(stored?.messageIds.has("100:1")).toBe(true);
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(3);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- recent-first initial sync indexes latest UID window before historical archive */
+  it("indexes the recent UID window first for a fresh large folder", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const fetchMetadataRangeCalls: string[] = [];
+    const messages = Array.from({ length: 10_000 }, (_, i) => mkMsg(i + 1));
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 77, uidNext: 10_001, msgs: messages }]]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { fetchMetadataRangeCalls }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(rep.folders[0]).toMatchObject({
+      forwardMessages: 1000,
+      backfilledMessages: 0,
+      forwardSyncedUid: 10_000,
+      backfillBeforeUid: 9001,
+      backfillComplete: false,
+    });
+    expect(fetchMetadataRangeCalls[0]).toBe("INBOX:9001:9050");
+    expect(fetchMetadataRangeCalls).not.toContain("INBOX:1:50");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
+    expect(stored?.messageIds.size).toBe(1000);
+    expect(stored?.messageIds.has("77:10000")).toBe(true);
+    expect(stored?.messageIds.has("77:1")).toBe(false);
+    const state = stored?.metadata as unknown as SyncState;
+    expect(state.forwardSyncedUid).toBe(10_000);
+    expect(state.backfillBeforeUid).toBe(9001);
+    expect(state.lastSyncedUid).toBe(10_000);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- historical backfill proceeds backwards in bounded windows */
+  it("backfills historical messages on the next tick after recent-first init", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const messages = Array.from({ length: 10_000 }, (_, i) => mkMsg(i + 1));
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 77, uidNext: 10_001, msgs: messages }]]),
+    };
+    await runSyncOnce(buildFakeDeps(imap, drive), acct, watcherDefault);
+    const fetchMetadataRangeCalls: string[] = [];
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { fetchMetadataRangeCalls }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(rep.folders[0]).toMatchObject({
+      forwardMessages: 0,
+      backfilledMessages: 500,
+      forwardSyncedUid: 10_000,
+      backfillBeforeUid: 8501,
+      backfillComplete: false,
+    });
+    expect(fetchMetadataRangeCalls[0]).toBe("INBOX:8951:9000");
+    expect(fetchMetadataRangeCalls).not.toContain("INBOX:1:50");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
+    expect(stored?.messageIds.has("77:8501")).toBe(true);
+    expect(stored?.messageIds.has("77:1")).toBe(false);
+    const state = stored?.metadata as unknown as SyncState;
+    expect(state.forwardSyncedUid).toBe(10_000);
+    expect(state.backfillBeforeUid).toBe(8501);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- new forward mail is indexed before historical backfill */
+  it("indexes new forward mail before running historical backfill", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const firstMessages = Array.from({ length: 10_000 }, (_, i) => mkMsg(i + 1));
+    const imap1: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 77, uidNext: 10_001, msgs: firstMessages }],
+      ]),
+    };
+    await runSyncOnce(buildFakeDeps(imap1, drive), acct, watcherDefault);
+
+    const nextMessages = [...firstMessages, mkMsg(10_001), mkMsg(10_002)];
+    const imap2: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 77, uidNext: 10_003, msgs: nextMessages }],
+      ]),
+    };
+    const fetchMetadataRangeCalls: string[] = [];
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap2, drive, { fetchMetadataRangeCalls }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(fetchMetadataRangeCalls[0]).toBe("INBOX:10001:10002");
+    expect(fetchMetadataRangeCalls[1]).toBe("INBOX:8951:9000");
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
+    const state = stored?.metadata as unknown as SyncState;
+    expect(state.forwardSyncedUid).toBe(10_002);
+    expect(state.backfillBeforeUid).toBe(8501);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- partial legacy lastSyncedUid state migrates to recent-first instead of continuing old-first */
+  it("migrates partial legacy sync state to recent-first", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    drive.mailboxes.set("exchange-work", { displayName: "Work" });
+    drive.folders.set(
+      "exchange-work",
+      new Map([
+        [
+          "INBOX",
+          {
+            metadata: {
+              uidValidity: 77,
+              uidNext: 10_001,
+              lastSyncedUid: 22,
+              lastSyncStartedAt: "2026-04-29T09:00:00.000Z",
+              lastSyncFinishedAt: null,
+              lastSyncError: null,
+            },
+            messageIds: new Set(Array.from({ length: 22 }, (_, i) => `77:${i + 1}`)),
+            payloads: new Map(),
+          },
+        ],
+      ]),
+    );
+    const messages = Array.from({ length: 10_000 }, (_, i) => mkMsg(i + 1));
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 77, uidNext: 10_001, msgs: messages }]]),
+    };
+    const fetchMetadataRangeCalls: string[] = [];
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { fetchMetadataRangeCalls }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(fetchMetadataRangeCalls[0]).toBe("INBOX:9001:9050");
+    expect(fetchMetadataRangeCalls).not.toContain("INBOX:23:72");
+    const state = drive.folders.get("exchange-work")?.get("INBOX")
+      ?.metadata as unknown as SyncState;
+    expect(state.forwardSyncedUid).toBe(10_000);
+    expect(state.backfillBeforeUid).toBe(9001);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- folder priority syncs INBOX and Sent before archives and Gmail All Mail */
+  it("syncs folders by product priority", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const imap: FakeImapState = {
+      folders: [
+        { path: "Archive", specialUse: null },
+        { path: "[Gmail]/All Mail", specialUse: "\\All" },
+        { path: "Sent", specialUse: "\\Sent" },
+        { path: "INBOX", specialUse: "\\Inbox" },
+      ],
+      messagesByFolder: new Map([
+        ["Archive", { uidValidity: 1, uidNext: 2, msgs: [mkMsg(1)] }],
+        ["[Gmail]/All Mail", { uidValidity: 1, uidNext: 2, msgs: [mkMsg(1)] }],
+        ["Sent", { uidValidity: 1, uidNext: 2, msgs: [mkMsg(1)] }],
+        ["INBOX", { uidValidity: 1, uidNext: 2, msgs: [mkMsg(1)] }],
+      ]),
+    };
+
+    const rep = await runSyncOnce(buildFakeDeps(imap, drive), acct, watcherDefault);
+
+    expect(rep.error).toBeNull();
+    expect(rep.folders.map((folder) => folder.folderId)).toEqual([
+      "INBOX",
+      "Sent",
+      "Archive",
+      "[Gmail]/All Mail",
+    ]);
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- watcher indexes attachment metadata without downloading/uploading bytes */
