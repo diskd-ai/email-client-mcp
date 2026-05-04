@@ -77,6 +77,26 @@ const main = async (): Promise<void> => {
     onEvent: (event) => log("imap.pool-event", event),
   });
 
+  const signalEndpoint = process.env.EMAIL_CLIENT_MCP_SIGNAL_ENDPOINT;
+  const signalApiKey = process.env.EMAIL_CLIENT_MCP_SIGNAL_API_KEY;
+  const notifier: SyncDeps["notifier"] = signalEndpoint
+    ? {
+        notifyEmailPersisted: async (event) => {
+          const response = await fetch(signalEndpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(signalApiKey ? { "X-Api-Key": signalApiKey } : {}),
+            },
+            body: JSON.stringify({ workspaceId: diskd.value.workspaceId, ...event }),
+          });
+          if (!response.ok) {
+            throw new Error(`signal notify failed (${response.status}): ${await response.text()}`);
+          }
+        },
+      }
+    : undefined;
+
   const syncDeps: SyncDeps = {
     drive: driveStore as unknown as SyncDeps["drive"],
     imap: {
@@ -162,6 +182,7 @@ const main = async (): Promise<void> => {
       },
     },
     now: () => new Date(),
+    notifier,
   };
 
   const bodyHydrationDeps: BodyHydrationDeps = {

@@ -119,6 +119,14 @@ export type SyncDeps = {
     }>;
   };
   readonly now: () => Date;
+  readonly notifier?: {
+    readonly notifyEmailPersisted: (event: {
+      readonly accountId: string;
+      readonly mailboxId: string;
+      readonly folderId: string;
+      readonly externalId: string;
+    }) => Promise<void>;
+  };
 };
 
 export type SyncFolderReport = {
@@ -448,6 +456,12 @@ const syncFolder = async (
     for (const [batchFrom, batchTo] of rangesToProcess) {
       let sawMessageInBatch = false;
       let durableUid = mode === "forward" ? batchFrom - 1 : batchTo + 1;
+      const persistedForwardInboxEvents: Array<{
+        readonly accountId: string;
+        readonly mailboxId: string;
+        readonly folderId: string;
+        readonly externalId: string;
+      }> = [];
       try {
         for await (const imapMessage of deps.imap.fetchMetadataRange(
           account.name,
@@ -480,8 +494,17 @@ const syncFolder = async (
 
           const changed = upsert.value.inserted + upsert.value.updated;
           newMessages += changed;
-          if (mode === "forward") forwardMessages += changed;
-          else backfilledMessages += changed;
+          if (mode === "forward") {
+            forwardMessages += changed;
+            if (changed > 0 && folderId === "INBOX") {
+              persistedForwardInboxEvents.push({
+                accountId: account.name,
+                mailboxId,
+                folderId,
+                externalId,
+              });
+            }
+          } else backfilledMessages += changed;
           if (hydrateBodies && bodyHydrationEnabledForFolder(watcher, folderPath, specialUse)) {
             bodyHydrationCandidates.push({ mailboxId, folderId, externalId });
           }
@@ -535,6 +558,17 @@ const syncFolder = async (
         };
       }
       state = checkpoint;
+
+      if (deps.notifier && persistedForwardInboxEvents.length > 0) {
+        for (const event of persistedForwardInboxEvents) {
+          try {
+            await deps.notifier.notifyEmailPersisted(event);
+          } catch {
+            // Best-effort post-checkpoint notification. app-service publishes
+            // deterministic event ids, so duplicate/replayed notifications are safe.
+          }
+        }
+      }
     }
     return null;
   };

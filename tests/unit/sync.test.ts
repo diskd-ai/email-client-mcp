@@ -82,6 +82,8 @@ const buildFakeDeps = (
     readonly fetchMetadataRangeCalls?: string[];
     readonly fetchBodyCalls?: string[];
     readonly fetchBodyErrors?: ReadonlyMap<number, ImapError>;
+    readonly notifyCalls?: string[];
+    readonly notifyError?: Error;
     readonly clock?: () => Date;
   },
 ): SyncDeps => {
@@ -264,6 +266,16 @@ const buildFakeDeps = (
       },
     },
     now: options?.clock ?? (() => new Date("2026-04-29T10:00:00.000Z")),
+    notifier: options?.notifyCalls
+      ? {
+          notifyEmailPersisted: async (event) => {
+            options.notifyCalls?.push(
+              `${event.accountId}:${event.mailboxId}:${event.folderId}:${event.externalId}`,
+            );
+            if (options.notifyError) throw options.notifyError;
+          },
+        }
+      : undefined,
   };
 };
 
@@ -313,6 +325,101 @@ describe("sync/runSyncOnce", () => {
     expect(stored?.messageIds.size).toBe(3);
     expect(stored?.messageIds.has("100:1")).toBe(true);
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(3);
+  });
+
+  it("notifies app-service after forward INBOX messages are stored and checkpointed", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const notifyCalls: string[] = [];
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 100, uidNext: 3, msgs: [mkMsg(1), mkMsg(2)] }],
+      ]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { notifyCalls }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(notifyCalls).toEqual([
+      "work:exchange-work:INBOX:100:1",
+      "work:exchange-work:INBOX:100:2",
+    ]);
+    const state = drive.folders.get("exchange-work")?.get("INBOX")
+      ?.metadata as unknown as SyncState;
+    expect(state.forwardSyncedUid).toBe(2);
+  });
+
+  it("does not notify when checkpoint write fails", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const notifyCalls: string[] = [];
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 100, uidNext: 2, msgs: [mkMsg(1)] }]]),
+    };
+    const deps = buildFakeDeps(imap, drive, { notifyCalls });
+    const originalUpsertFolder = deps.drive.upsertFolder;
+    let upsertFolderCalls = 0;
+    deps.drive.upsertFolder = async (...args) => {
+      upsertFolderCalls += 1;
+      if (upsertFolderCalls === 2) {
+        return Err({ kind: "DriveError", message: "checkpoint failed" } as AppError);
+      }
+      return originalUpsertFolder(...args);
+    };
+
+    const rep = await runSyncOnce(deps, acct, watcherDefault);
+
+    expect(rep.folders[0]?.error).toContain("checkpoint failed");
+    expect(notifyCalls).toEqual([]);
+  });
+
+  it("does not fail sync when notification fails", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const notifyCalls: string[] = [];
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 100, uidNext: 2, msgs: [mkMsg(1)] }]]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { notifyCalls, notifyError: new Error("notify down") }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(rep.folders[0]?.error).toBeNull();
+    expect(notifyCalls).toEqual(["work:exchange-work:INBOX:100:1"]);
+  });
+
+  it("does not notify for historical backfill or non-INBOX folders", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const notifyCalls: string[] = [];
+    const messages = Array.from({ length: 10 }, (_, i) => mkMsg(i + 1));
+    const imap: FakeImapState = {
+      folders: [
+        { path: "INBOX", specialUse: "\\Inbox" },
+        { path: "Sent", specialUse: "\\Sent" },
+      ],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 100, uidNext: 11, msgs: messages }],
+        ["Sent", { uidValidity: 100, uidNext: 2, msgs: [mkMsg(1)] }],
+      ]),
+    };
+    const watcher: WatcherSettings = {
+      ...watcherDefault,
+      recent_first: { enabled: true, initial_recent_window: 2, backfill_window_per_tick: 2 },
+    };
+
+    await runSyncOnce(buildFakeDeps(imap, drive, { notifyCalls }), acct, watcher);
+    notifyCalls.length = 0;
+    await runSyncOnce(buildFakeDeps(imap, drive, { notifyCalls }), acct, watcher);
+
+    expect(notifyCalls).toEqual([]);
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- recent-first initial sync indexes latest UID window before historical archive */
