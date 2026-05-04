@@ -23,6 +23,7 @@ import { errorMessage } from "./domain/errors.js";
 import { Err, Ok, type Result } from "./domain/result.js";
 import {
   downloadPartByUid,
+  fetchDisplayBodyByUid,
   fetchEnvelopesUidRange,
   fetchMetadataUidRange,
   folderStatus,
@@ -124,6 +125,23 @@ const main = async (): Promise<void> => {
           return out;
         });
         for (const m of buf) yield m as never;
+      },
+      fetchBody: async (accountId, path, uid) => {
+        const c = await pool.forAccount(accountId);
+        if (c.tag === "Err") return c;
+        try {
+          const body = await withMailboxLock(c.value, path, async () =>
+            fetchDisplayBodyByUid(c.value, uid),
+          );
+          return Ok(body);
+        } catch (cause) {
+          return Err({
+            kind: "ImapError",
+            accountId,
+            message: `fetch body ${path}/${uid}: ${(cause as Error)?.message ?? String(cause)}`,
+            cause,
+          } as ImapError);
+        }
       },
       fetchEnvelopesRange: async function* (accountId, path, fromUid, toUid) {
         const c = await pool.forAccount(accountId);

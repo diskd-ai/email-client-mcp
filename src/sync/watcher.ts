@@ -21,6 +21,8 @@ export type WatcherFolderStatus = {
   readonly folderId: string;
   readonly newMessages: number;
   readonly reconciledFlags: number;
+  readonly hydratedBodies: number;
+  readonly bodyHydrationErrors: number;
   readonly uidValidityRolled: boolean;
   readonly error: string | null;
 };
@@ -57,6 +59,8 @@ const reportToStatus = (rep: SyncReport): WatcherAccountStatus => ({
     folderId: f.folderId,
     newMessages: f.newMessages,
     reconciledFlags: f.reconciledFlags,
+    hydratedBodies: f.hydratedBodies,
+    bodyHydrationErrors: f.bodyHydrationErrors,
     uidValidityRolled: f.uidValidityRolled,
     error: f.error,
   })),
@@ -111,6 +115,8 @@ export const buildWatcher = (
             accountId: acct.name,
             folders: rep.folders.length,
             newMessages: rep.folders.reduce((s, f) => s + f.newMessages, 0),
+            hydratedBodies: rep.folders.reduce((s, f) => s + f.hydratedBodies, 0),
+            bodyHydrationErrors: rep.folders.reduce((s, f) => s + f.bodyHydrationErrors, 0),
           });
         return rep;
       } catch (cause) {

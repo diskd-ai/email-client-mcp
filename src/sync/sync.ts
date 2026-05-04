@@ -25,6 +25,7 @@ import { type FetchedMessageLike, toStoredPayload } from "../imap/mapper.js";
 import type { UploadAttachmentResult } from "../store/attachments.js";
 import { externalIdFor, sanitizeMailboxId } from "../store/conventions.js";
 import type { StoredAttachment, StoredEmailPayload, SyncState } from "../store/payloadTypes.js";
+import { type BodyHydrationRef, hydrateStoredMessageBodies } from "./bodyHydration.js";
 
 const BATCH_SIZE = 50;
 
@@ -90,6 +91,21 @@ export type SyncDeps = {
       fromUid: number,
       toUid: number,
     ) => AsyncIterable<FetchedMessageLike>;
+    readonly fetchBody: (
+      accountId: string,
+      mailbox: string,
+      uid: number,
+    ) => Promise<
+      Result<
+        ImapError,
+        {
+          readonly bodyText: string | null;
+          readonly bodyHtml: string | null;
+          readonly truncated: boolean;
+          readonly bytesRead: number;
+        } | null
+      >
+    >;
     readonly downloadPart: (
       accountId: string,
       path: string,
@@ -109,6 +125,8 @@ export type SyncFolderReport = {
   readonly folderId: string;
   readonly newMessages: number;
   readonly reconciledFlags: number;
+  readonly hydratedBodies: number;
+  readonly bodyHydrationErrors: number;
   readonly uidValidityRolled: boolean;
   readonly error: string | null;
 };
@@ -160,6 +178,20 @@ const mergeReconciledFlags = (
   };
 };
 
+const isAllMailFolder = (folderPath: string, specialUse: string | null): boolean =>
+  specialUse === "\\All" || /(?:^|\/)All Mail$/i.test(folderPath);
+
+const bodyHydrationEnabledForFolder = (
+  watcher: WatcherSettings,
+  folderPath: string,
+  specialUse: string | null,
+): boolean => {
+  const settings = watcher.body_hydration;
+  if (settings.enabled !== true || settings.max_messages_per_tick <= 0) return false;
+  if (settings.skip_all_mail && isAllMailFolder(folderPath, specialUse)) return false;
+  return true;
+};
+
 /**
  * Sync one folder. Returns the per-folder report; never throws.
  * `lastSyncedUid` is advanced only after each successful batch upsert.
@@ -169,10 +201,15 @@ const syncFolder = async (
   account: Account,
   mailboxId: string,
   folderPath: string,
-  flagWindow: number,
+  specialUse: string | null,
+  watcher: WatcherSettings,
 ): Promise<SyncFolderReport> => {
   const folderId = folderPath;
   const startIso = deps.now().toISOString();
+  const flagWindow = watcher.flag_reconcile_window;
+  const bodyHydrationCandidates: BodyHydrationRef[] = [];
+  let hydratedBodies = 0;
+  let bodyHydrationErrors = 0;
 
   const statusR = await deps.imap.folderStatus(account.name, folderPath);
   if (statusR.tag === "Err") {
@@ -180,6 +217,8 @@ const syncFolder = async (
       folderId,
       newMessages: 0,
       reconciledFlags: 0,
+      hydratedBodies: 0,
+      bodyHydrationErrors: 0,
       uidValidityRolled: false,
       error: errorMessage(statusR.error),
     };
@@ -192,6 +231,8 @@ const syncFolder = async (
       folderId,
       newMessages: 0,
       reconciledFlags: 0,
+      hydratedBodies: 0,
+      bodyHydrationErrors: 0,
       uidValidityRolled: false,
       error: errorMessage(existing.error),
     };
@@ -208,6 +249,8 @@ const syncFolder = async (
         folderId,
         newMessages: 0,
         reconciledFlags: 0,
+        hydratedBodies: 0,
+        bodyHydrationErrors: 0,
         uidValidityRolled,
         error: errorMessage(del.error),
       };
@@ -241,6 +284,8 @@ const syncFolder = async (
         folderId,
         newMessages: 0,
         reconciledFlags: 0,
+        hydratedBodies: 0,
+        bodyHydrationErrors: 0,
         uidValidityRolled,
         error: errorMessage(w.error),
       };
@@ -258,6 +303,8 @@ const syncFolder = async (
         folderId,
         newMessages: 0,
         reconciledFlags: 0,
+        hydratedBodies: 0,
+        bodyHydrationErrors: 0,
         uidValidityRolled,
         error: errorMessage(w.error),
       };
@@ -279,6 +326,8 @@ const syncFolder = async (
           folderId,
           newMessages,
           reconciledFlags: 0,
+          hydratedBodies,
+          bodyHydrationErrors,
           uidValidityRolled,
           error: errorMessage(w.error),
         };
@@ -287,6 +336,8 @@ const syncFolder = async (
         folderId,
         newMessages,
         reconciledFlags: 0,
+        hydratedBodies,
+        bodyHydrationErrors,
         uidValidityRolled,
         error: errorMessage(error),
       };
@@ -325,6 +376,9 @@ const syncFolder = async (
           }
 
           newMessages += upsert.value.inserted + upsert.value.updated;
+          if (bodyHydrationEnabledForFolder(watcher, folderPath, specialUse)) {
+            bodyHydrationCandidates.push({ mailboxId, folderId, externalId });
+          }
           lastSynced = uid;
         }
       } catch (cause) {
@@ -339,7 +393,7 @@ const syncFolder = async (
       }
 
       // Checkpoint: write once after the batch, but the value is the
-      // highest UID whose full message payload + attachment bytes are durable.
+      // highest UID whose metadata payload is durable.
       const checkpoint: SyncState = {
         ...(state as SyncState),
         uidValidity: status.uidValidity,
@@ -354,11 +408,32 @@ const syncFolder = async (
           folderId,
           newMessages,
           reconciledFlags: 0,
+          hydratedBodies,
+          bodyHydrationErrors,
           uidValidityRolled,
           error: errorMessage(w.error),
         };
       }
       state = checkpoint;
+    }
+  }
+
+  if (bodyHydrationCandidates.length > 0) {
+    const hydration = await hydrateStoredMessageBodies(
+      {
+        drive: deps.drive,
+        imap: { fetchBody: deps.imap.fetchBody },
+        now: deps.now,
+      },
+      bodyHydrationCandidates.slice().reverse(),
+      { maxMessages: watcher.body_hydration.max_messages_per_tick },
+    );
+    if (hydration.tag === "Ok") {
+      hydratedBodies = hydration.value.loaded.length;
+      bodyHydrationErrors =
+        hydration.value.failedRetryable.length + hydration.value.failedPermanent.length;
+    } else {
+      bodyHydrationErrors = bodyHydrationCandidates.length;
     }
   }
 
@@ -391,6 +466,8 @@ const syncFolder = async (
             folderId,
             newMessages,
             reconciledFlags: 0,
+            hydratedBodies,
+            bodyHydrationErrors,
             uidValidityRolled,
             error: errorMessage(existingPayload.error),
           };
@@ -406,6 +483,8 @@ const syncFolder = async (
             folderId,
             newMessages,
             reconciledFlags: 0,
+            hydratedBodies,
+            bodyHydrationErrors,
             uidValidityRolled,
             error: errorMessage(ups.error),
           };
@@ -419,13 +498,23 @@ const syncFolder = async (
         folderId,
         newMessages,
         reconciledFlags: 0,
+        hydratedBodies,
+        bodyHydrationErrors,
         uidValidityRolled,
         error: errorMessage(e),
       };
     }
   }
 
-  return { folderId, newMessages, reconciledFlags, uidValidityRolled, error: null };
+  return {
+    folderId,
+    newMessages,
+    reconciledFlags,
+    hydratedBodies,
+    bodyHydrationErrors,
+    uidValidityRolled,
+    error: null,
+  };
 };
 
 /**
@@ -475,7 +564,7 @@ export const runSyncOnce = async (
 
   const reports: SyncFolderReport[] = [];
   for (const f of filteredFolders) {
-    const r = await syncFolder(deps, account, mailboxId, f.path, watcher.flag_reconcile_window);
+    const r = await syncFolder(deps, account, mailboxId, f.path, f.specialUse, watcher);
     reports.push(r);
   }
 

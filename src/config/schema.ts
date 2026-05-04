@@ -49,11 +49,22 @@ export type OAuthAccount = z.infer<typeof oauthAccountSchema>;
 
 export const isOAuthAccount = (a: Account): a is OAuthAccount => "oauth2" in a;
 
+const bodyHydrationSchema = z.object({
+  enabled: z.boolean().default(true),
+  max_messages_per_tick: z.number().int().min(0).default(50),
+  skip_all_mail: z.boolean().default(true),
+});
+
 const watcherSchema = z.object({
   enabled: z.boolean().default(true),
   interval_ms: z.number().int().min(60_000).default(60_000),
   folders: z.array(z.string()).optional(),
   flag_reconcile_window: z.number().int().min(0).default(500),
+  body_hydration: bodyHydrationSchema.default({
+    enabled: true,
+    max_messages_per_tick: 50,
+    skip_all_mail: true,
+  }),
 });
 
 /**
@@ -75,6 +86,11 @@ export const configSchema = z.object({
     enabled: true,
     interval_ms: 60_000,
     flag_reconcile_window: 500,
+    body_hydration: {
+      enabled: true,
+      max_messages_per_tick: 50,
+      skip_all_mail: true,
+    },
   }),
 });
 

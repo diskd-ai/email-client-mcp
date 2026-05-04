@@ -18,7 +18,17 @@ const watcherDefault: WatcherSettings = {
   enabled: true,
   interval_ms: 60_000,
   flag_reconcile_window: 0,
+  body_hydration: { enabled: false, max_messages_per_tick: 50, skip_all_mail: true },
 };
+
+const watcherWithBodyHydration = (maxMessagesPerTick = 50): WatcherSettings => ({
+  ...watcherDefault,
+  body_hydration: {
+    enabled: true,
+    max_messages_per_tick: maxMessagesPerTick,
+    skip_all_mail: true,
+  },
+});
 
 type FakeImapState = {
   readonly folders: ReadonlyArray<{ readonly path: string; readonly specialUse: string | null }>;
@@ -69,6 +79,8 @@ const buildFakeDeps = (
     readonly downloadCalls?: string[];
     readonly fetchRangeCalls?: string[];
     readonly fetchMetadataRangeCalls?: string[];
+    readonly fetchBodyCalls?: string[];
+    readonly fetchBodyErrors?: ReadonlyMap<number, ImapError>;
     readonly clock?: () => Date;
   },
 ): SyncDeps => {
@@ -224,6 +236,17 @@ const buildFakeDeps = (
           if (m.uid >= fromUid && m.uid <= toUid) yield m;
         }
       },
+      fetchBody: async (accountId, path, uid) => {
+        options?.fetchBodyCalls?.push(`${accountId}:${path}:${uid}`);
+        const error = options?.fetchBodyErrors?.get(uid);
+        if (error !== undefined) return Err(error);
+        return Ok({
+          bodyText: `body-${uid}`,
+          bodyHtml: null,
+          truncated: false,
+          bytesRead: Buffer.byteLength(`body-${uid}`, "utf8"),
+        });
+      },
       downloadPart: async (_accountId, _path, uid, partId) => {
         options?.downloadCalls?.push(`${uid}:${partId}`);
         return {
@@ -332,6 +355,143 @@ describe("sync/runSyncOnce", () => {
     expect(payload?.attachments[0]).not.toHaveProperty("storedAt");
     expect(payload?.attachments[0]).not.toHaveProperty("driveInode");
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(94);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- eager body hydration runs after metadata checkpoint for current-tick messages */
+  it("hydrates newly indexed message bodies without blocking checkpoint", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const fetchBodyCalls: string[] = [];
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 14, uidNext: 3, msgs: [mkMsg(1), mkMsg(2)] }],
+      ]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { fetchBodyCalls }),
+      acct,
+      watcherWithBodyHydration(),
+    );
+
+    expect(rep.error).toBeNull();
+    expect(rep.folders[0]?.hydratedBodies).toBe(2);
+    expect(rep.folders[0]?.bodyHydrationErrors).toBe(0);
+    expect(fetchBodyCalls).toEqual(["work:INBOX:2", "work:INBOX:1"]);
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
+    expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(2);
+    expect(stored?.payloads.get("14:1")?.bodyState).toBe("loaded");
+    expect(stored?.payloads.get("14:1")?.bodyText).toBe("body-1");
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- retryable body hydration failures do not fail metadata sync */
+  it("records throttled body hydration as retryable without failing folder sync", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 14, uidNext: 2, msgs: [mkMsg(1)] }]]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, {
+        fetchBodyErrors: new Map([
+          [
+            1,
+            {
+              kind: "ImapError",
+              accountId: "work",
+              message: "Some messages could not be FETCHed (Failure) [THROTTLED]",
+            },
+          ],
+        ]),
+      }),
+      acct,
+      watcherWithBodyHydration(),
+    );
+
+    expect(rep.error).toBeNull();
+    expect(rep.folders[0]?.newMessages).toBe(1);
+    expect(rep.folders[0]?.hydratedBodies).toBe(0);
+    expect(rep.folders[0]?.bodyHydrationErrors).toBe(1);
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
+    expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(1);
+    expect(stored?.payloads.get("14:1")?.bodyState).toBe("failed_retryable");
+    expect(stored?.payloads.get("14:1")?.bodyFetchError).toContain("THROTTLED");
+  });
+
+  it("does not hydrate bodies when eager body hydration is disabled", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const fetchBodyCalls: string[] = [];
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 14, uidNext: 2, msgs: [mkMsg(1)] }]]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { fetchBodyCalls }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(fetchBodyCalls).toEqual([]);
+    expect(rep.folders[0]?.hydratedBodies).toBe(0);
+    expect(drive.folders.get("exchange-work")?.get("INBOX")?.payloads.get("14:1")?.bodyState).toBe(
+      "not_loaded",
+    );
+  });
+
+  it("enforces max body hydration messages per tick", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const fetchBodyCalls: string[] = [];
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([
+        [
+          "INBOX",
+          { uidValidity: 14, uidNext: 6, msgs: [mkMsg(1), mkMsg(2), mkMsg(3), mkMsg(4), mkMsg(5)] },
+        ],
+      ]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { fetchBodyCalls }),
+      acct,
+      watcherWithBodyHydration(2),
+    );
+
+    expect(rep.error).toBeNull();
+    expect(rep.folders[0]?.newMessages).toBe(5);
+    expect(rep.folders[0]?.hydratedBodies).toBe(2);
+    expect(fetchBodyCalls).toEqual(["work:INBOX:5", "work:INBOX:4"]);
+    const stored = drive.folders.get("exchange-work")?.get("INBOX");
+    expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(5);
+    expect(stored?.payloads.get("14:3")?.bodyState).toBe("not_loaded");
+  });
+
+  it("skips eager body hydration for All Mail folders", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const fetchBodyCalls: string[] = [];
+    const imap: FakeImapState = {
+      folders: [{ path: "[Gmail]/All Mail", specialUse: "\\All" }],
+      messagesByFolder: new Map([
+        ["[Gmail]/All Mail", { uidValidity: 14, uidNext: 2, msgs: [mkMsg(1)] }],
+      ]),
+    };
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { fetchBodyCalls }),
+      acct,
+      watcherWithBodyHydration(),
+    );
+
+    expect(rep.error).toBeNull();
+    expect(fetchBodyCalls).toEqual([]);
+    expect(rep.folders[0]?.newMessages).toBe(1);
+    expect(rep.folders[0]?.hydratedBodies).toBe(0);
+    expect(
+      drive.folders.get("exchange-work")?.get("[Gmail]/All Mail")?.payloads.get("14:1")?.bodyState,
+    ).toBe("not_loaded");
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- lastSyncedUid does not advance when upsertBatch fails (next tick replays) */
