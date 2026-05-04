@@ -55,7 +55,8 @@ Design principles:
 - Metadata checkpoint safety: a folder checkpoint advances after durable metadata upsert, not after body or attachments.
 - Content hydration isolation: body and attachment states are independent retryable sub-states on each stored message.
 - Recent-first UX: new and recent mail appears before historical archive backfill completes.
-- Batch over chatty calls: agent hydration tools accept multiple message references.
+- Batch over chatty calls: system hydration operations accept multiple message references.
+- Keep LLM tool surface small: ordinary operatives use stored-mail/messages tools; `email-client-mcp` tools are treated as system/runtime tools, not planning choices for the model.
 - Best-effort body cache: eager body loading improves common UX but never blocks indexing.
 - Attachments explicit only: attachment bytes move only after a user/agent asks for a specific attachment.
 - Backward-compatible reads: missing new state fields are normalized without rewriting old records.
@@ -99,26 +100,26 @@ Attachments are handled only by explicit tools/API flows:
 
 Agent correspondence analysis flow:
 
-1. Agent searches/list candidates by metadata: sender, recipients, dates, folders, subject, `bodyState`, `hasAttachments`.
-2. Agent receives candidate refs and cache state:
+1. Agent calls ordinary stored-mail/messages tools, for example list/search/read, to find candidate messages by sender, recipients, dates, folders, subject, or existing body/snippet text.
+2. The stored-mail consumer layer reads `messagesStore` and receives candidate refs/cache state:
 
    ```json
    {
-     "account": "google__work",
-     "mailbox": "INBOX",
-     "uid": 123,
+     "mailboxId": "exchange-google-work",
+     "folderId": "INBOX",
      "externalId": "14:123",
      "subject": "...",
      "date": "...",
-     "bodyState": "loaded",
+     "bodyState": "not_loaded",
      "snippet": "..."
    }
    ```
 
-3. Agent analyzes already-loaded bodies immediately.
-4. For missing bodies, agent calls a batch hydration tool, not one `get_email` per message.
-5. For large candidate sets, agent processes in chunks and summarizes incrementally.
-6. Attachments are loaded only when the analysis specifically needs an attachment.
+3. The system layer, not the LLM, determines which selected messages are missing bodies.
+4. The system layer calls `email-client-mcp` `system_hydrate_email_bodies` with bounded batches.
+5. The stored-mail consumer rereads or receives hydrated payloads and returns normal stored-mail results to the agent.
+6. For large candidate sets, the consumer/agent processes in chunks and summarizes incrementally.
+7. Attachments are loaded only when the analysis specifically needs an attachment.
 
 Data model
 ----------
@@ -264,7 +265,7 @@ Folder priority:
 Body hydration policy
 ---------------------
 
-Body hydration is a cache-fill operation. It may run from the watcher or explicit tools.
+Body hydration is a cache-fill operation. It may run from the watcher or from deterministic system calls. It is not intended to be an ordinary LLM planning decision.
 
 Recommended defaults:
 
@@ -313,7 +314,7 @@ Hydration result mapping:
   bodyFetchError = typed message
   ```
 
-A message with `failed_retryable` body remains discoverable and analyzable by metadata. It can be retried by later eager hydration or explicit agent hydration.
+A message with `failed_retryable` body remains discoverable and analyzable by metadata. It can be retried by later eager hydration or by a deterministic system hydration call.
 
 Attachment hydration policy
 ---------------------------
@@ -359,60 +360,34 @@ The operation must not expose `driveInode` as the user/agent-facing attachment i
 MCP tool design
 ---------------
 
-Existing tools remain available, but new tools should avoid one-message-at-a-time hydration for agent workflows.
+`email-client-mcp` tools are system/runtime operations. Ordinary operatives should continue to use stored-mail/messages tools that read already-synced mail from Drive/messagesStore. Hydration decisions should be made by deterministic consumer code under those stored-mail tools, not by the LLM.
 
-New or revised tools:
+New system tool:
 
-### `search_emails`
+### `system_hydrate_email_bodies`
 
-Metadata/cache search over `messagesStore`.
-
-Input:
-
-```ts
-type SearchEmailsInput = {
-  account?: string;
-  mailbox?: string;
-  from?: string;
-  to?: string;
-  query?: string;      // v1: subject/address metadata only unless body already loaded
-  since?: string;
-  until?: string;
-  hasAttachments?: boolean;
-  bodyState?: "loaded" | "not_loaded" | "any";
-  limit?: number;
-  cursor?: string | null;
-};
-```
-
-Output includes message refs, metadata, `bodyState`, snippet, and attachment metadata.
-
-### `load_email_bodies`
-
-Batch body hydration. This is the primary agent tool for correspondence analysis.
+Batch body hydration for stored messages. This tool exists so system consumers can hydrate missing bodies after selecting candidate messages from `messagesStore`.
 
 Input:
 
 ```ts
-type LoadEmailBodiesInput = {
+type SystemHydrateEmailBodiesInput = {
   messages: readonly {
-    account: string;
-    mailbox: string;
-    uid: number;
+    mailboxId: string;
+    folderId: string;
+    externalId: string;
   }[];
-  persist?: boolean;       // default true
-  format?: "raw" | "text" | "stripped";
-  maxMessages?: number;    // capped by server, default 50
-  maxTotalBytes?: number;  // capped by server
+  refresh?: boolean;      // default false; loaded bodies are skipped unless true
+  maxMessages?: number;   // capped by server, default 50
 };
 ```
 
 Output:
 
 ```ts
-type LoadEmailBodiesResult = {
-  loaded: readonly LoadedBodyResult[];
-  skipped: readonly SkippedBodyResult[];
+type SystemHydrateEmailBodiesResult = {
+  loaded: readonly HydratedBodyResult[];
+  skipped: readonly HydratedBodyResult[];
   failedRetryable: readonly FailedBodyResult[];
   failedPermanent: readonly FailedBodyResult[];
 };
@@ -422,31 +397,17 @@ Rules:
 
 - Server enforces maximum messages per call.
 - Results are partial-success; one throttled message does not fail the whole call.
-- Already-loaded messages can be returned from store without IMAP fetch.
-- Missing or stale cached bodies can be fetched from IMAP and persisted.
+- Already-loaded messages are returned in `skipped` when `refresh=false`.
+- Missing or stale cached bodies are fetched from IMAP and persisted.
+- Attachment bytes are never loaded by this tool.
+- The tool may appear in the MCP runtime catalog in v1; hiding system tools from ordinary operative planning is a follow-up in MCP Hub / agent orchestration.
 
-### `get_full_email`
+Future stored-mail/messages tools:
 
-Single-message convenience wrapper.
-
-Behavior:
-
-- Return cached body from `messagesStore` if `bodyState=loaded` and `refresh=false`.
-- Otherwise fetch display body parts from IMAP, update body state, and return result.
-- Does not load attachment bytes.
-
-### `load_email_attachment`
-
-Load one attachment by `attachmentId` and persist it to Drive `messagesStore` attachment storage.
-
-### `read_email_attachment`
-
-Agent convenience for text-like attachments.
-
-Rules:
-
-- Refuses to inline large binary payloads.
-- For unsupported binary content, returns a typed result instructing the agent to use `load_email_attachment` or save-to-Drive workflow.
+- `messages_list` / `inbox_list`: return metadata and snippets; should not hydrate bodies just for list rendering.
+- `messages_read` / `inbox_read`: may call `system_hydrate_email_bodies` for exactly one missing body, then return hydrated stored content.
+- `messages_search` / `inbox_search`: may select candidate messages by metadata/body cache and hydrate a bounded top-N subset before returning analysis-ready results.
+- `load_email_attachment` / `read_email_attachment`: remain future explicit system/user actions for attachment bytes; they are not part of body hydration.
 
 Exchange/app-service behavior
 -----------------------------
@@ -544,8 +505,8 @@ Watcher tick lifecycle:
 Hydration lifecycle:
 
 - Eager hydration runs opportunistically after metadata sync within strict budgets.
-- Explicit hydration tools run immediately but enforce server caps.
-- Retryable body/attachment states are retried only after cooldown.
+- `system_hydrate_email_bodies` runs immediately for deterministic stored-mail consumers and enforces server caps.
+- Retryable body/attachment states are retried only after cooldown or explicit refresh.
 - Permanent failures require explicit refresh or payload/state reset in a future admin/debug flow.
 
 Future-proofing
@@ -632,23 +593,22 @@ Steps:
 4. Skip Gmail All Mail for eager hydration in v1.
 5. Record hydration counters/errors separately in watcher report/status.
 
-### Phase 4: Batch body tools
+### Phase 4: System body hydration tool
 
 Files:
 
-- `src/tools/loadEmailBodies.ts` (new)
-- `src/tools/getFullEmail.ts` (new or adapted from `getEmail.ts`)
-- `src/tools/searchEmails.ts` (new, if store search/list API supports required filters)
+- `src/tools/systemHydrateEmailBodies.ts` (new)
 - `src/tools/registry.ts`
-- `tests/unit/loadEmailBodies.test.ts` (new)
-- `tests/unit/getFullEmail.test.ts` (new)
+- `src/server.ts`
+- `tests/unit/systemHydrateEmailBodies.test.ts` (new)
 
 Steps:
 
-1. Add batch input schemas with server-side caps.
-2. Return cached bodies when available.
-3. Hydrate missing bodies with partial-success result.
-4. Register tools with descriptions that instruct agents to batch hydrate candidate sets.
+1. Add `system_hydrate_email_bodies` input schema with server-side caps.
+2. Accept system message refs as `(mailboxId, folderId, externalId)`.
+3. Call `hydrateStoredMessageBodies()` and return partial-success result buckets.
+4. Pass `BodyHydrationDeps` from the composition root into tool registration.
+5. Register the tool with a system-only description. Hiding it from ordinary model-visible catalogs is a follow-up.
 
 ### Phase 5: Explicit attachment hydration tools
 
@@ -723,10 +683,11 @@ Unit tests:
   - Watcher status reports metadata sync separately from body hydration.
   - Cooldown skips retryable body hydration until expiry.
 
-- `tests/unit/loadEmailBodies.test.ts`
+- `tests/unit/systemHydrateEmailBodies.test.ts`
   - Tool enforces max messages per call.
+  - Tool accepts `(mailboxId, folderId, externalId)` refs.
   - Tool returns partial-success JSON shape.
-  - Tool persists hydrated body when `persist=true`.
+  - Tool persists hydrated body through `hydrateStoredMessageBodies()`.
   - Tool does not load attachments.
 
 - `tests/unit/loadEmailAttachment.test.ts`
@@ -741,9 +702,9 @@ Integration-style unit tests with mocked Drive/IMAP:
 - New incoming mail after recent-first init is indexed before historical backfill.
 - Agent scenario test:
   1. store has 100 candidate messages, 60 loaded and 40 not loaded;
-  2. `search_emails` returns candidate refs and body states;
-  3. `load_email_bodies` hydrates missing bodies in capped batches;
-  4. failed retryable messages are returned separately without failing the whole tool.
+  2. stored-mail/messages accessor selects candidate refs and body states;
+  3. system code calls `system_hydrate_email_bodies` for missing bodies in capped batches;
+  4. failed retryable messages are returned separately without failing the whole operation.
 
 Acceptance criteria
 -------------------
@@ -752,10 +713,10 @@ Acceptance criteria
 - Given an attachment larger than APIS upload limits, when watcher sync runs, then no upload is attempted and mailbox indexing still succeeds.
 - Given Gmail returns `THROTTLED` during body hydration, when hydration runs, then the process does not crash, the message body state becomes `failed_retryable`, and metadata checkpoint remains advanced.
 - Given Gmail returns `THROTTLED` during metadata fetch, when watcher sync runs, then the folder report contains a retryable error and no checkpoint is advanced past unwritten metadata.
-- Given a message has `bodyState=not_loaded`, when `load_email_bodies` is called for it, then the server fetches display body parts, persists body fields when requested, and returns the loaded body in the result.
-- Given a batch body hydration request includes loaded and unloaded messages, when the tool runs, then loaded messages are served from cache and unloaded messages are fetched within server caps.
-- Given a batch body hydration request has one throttled message, when the tool runs, then the response includes partial successes and `failedRetryable` entry for the throttled message.
-- Given an agent searches for messages from a sender, when candidate messages have mixed body states, then the search result includes body state and stable message refs suitable for batch hydration.
+- Given a message has `bodyState=not_loaded`, when `system_hydrate_email_bodies` is called for its `(mailboxId, folderId, externalId)`, then the server fetches display body parts, persists body fields, and returns the loaded body result.
+- Given a system body hydration request includes loaded and unloaded messages, when the tool runs, then loaded messages are served from cache and unloaded messages are fetched within server caps.
+- Given a system body hydration request has one throttled message, when the tool runs, then the response includes partial successes and `failedRetryable` entry for the throttled message.
+- Given an agent searches for messages from a sender, when candidate messages have mixed body states, then the stored-mail consumer, not the LLM, calls system hydration for the bounded missing subset before returning analysis-ready results.
 - Given a message has attachment metadata, when `load_email_attachment` is called with its `attachmentId`, then the server downloads exactly that IMAP part, uploads it to Drive, and patches only that attachment state.
 - Given a caller tries to access attachment content by `driveInode`, when using public MCP/API contracts, then the contract rejects or ignores that identifier and requires `attachmentId`.
 - Given an empty large folder with `uidNext=10001`, when recent-first sync runs with `initialRecentWindow=1000`, then the first indexed range is `9001..10000`, not `1..10000`.

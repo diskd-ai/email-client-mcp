@@ -32,6 +32,7 @@ import {
 import { buildImapPool } from "./imap/pool.js";
 import { buildDiskd } from "./sdk/diskdClient.js";
 import { buildDriveStore } from "./store/driveStore.js";
+import type { BodyHydrationDeps } from "./sync/bodyHydration.js";
 import type { SyncDeps } from "./sync/sync.js";
 import { buildWatcher } from "./sync/watcher.js";
 import { registerTools } from "./tools/registry.js";
@@ -162,6 +163,12 @@ const main = async (): Promise<void> => {
     now: () => new Date(),
   };
 
+  const bodyHydrationDeps: BodyHydrationDeps = {
+    drive: driveStore as unknown as BodyHydrationDeps["drive"],
+    imap: { fetchBody: syncDeps.imap.fetchBody },
+    now: () => new Date(),
+  };
+
   const watcher = buildWatcher(syncDeps, cfg.value.accounts, cfg.value.watcher, log);
 
   const server = new McpServer({
@@ -173,6 +180,7 @@ const main = async (): Promise<void> => {
     accounts: cfg.value.accounts,
     imapPool: pool,
     watcher,
+    bodyHydration: bodyHydrationDeps,
   });
 
   const transport = new StdioServerTransport();
