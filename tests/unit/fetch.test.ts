@@ -1,5 +1,55 @@
 import { describe, expect, it } from "vitest";
-import { decodeMimeBodyPart, findDisplayBodyPartIds } from "../../src/imap/fetch.js";
+import {
+  decodeMimeBodyPart,
+  fetchMetadataUidRange,
+  findDisplayBodyPartIds,
+} from "../../src/imap/fetch.js";
+
+describe("imap/fetch metadata-only range", () => {
+  /* REQUIREMENT end:comm/email-client-mcp/imap/fetch -- metadata sync fetches envelope/bodyStructure without display body parts */
+  it("fetches message metadata without requesting body parts", async () => {
+    const fetchCalls: unknown[] = [];
+    const client = {
+      fetch: async function* (...args: unknown[]) {
+        fetchCalls.push(args);
+        yield {
+          uid: 7,
+          flags: new Set(["\\Seen"]),
+          envelope: { subject: "Indexed" },
+          bodyStructure: { type: "multipart/mixed" },
+          internalDate: new Date("2026-04-29T10:00:00.000Z"),
+        };
+      },
+      fetchOne: async () => {
+        throw new Error("metadata range must not fetch body parts");
+      },
+      download: async () => {
+        throw new Error("metadata range must not download attachments");
+      },
+    };
+
+    const messages = [];
+    for await (const msg of fetchMetadataUidRange(client as never, 5, 9)) {
+      messages.push(msg);
+    }
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.uid).toBe(7);
+    expect(fetchCalls).toEqual([
+      [
+        "5:9",
+        {
+          uid: true,
+          flags: true,
+          envelope: true,
+          bodyStructure: true,
+          internalDate: true,
+        },
+        { uid: true },
+      ],
+    ]);
+  });
+});
 
 describe("imap/fetch body part discovery", () => {
   /* REQUIREMENT end:comm/email-client-mcp/imap/fetch -- display body fetch uses concrete MIME part ids, never semantic BODY.PEEK[HTML] */

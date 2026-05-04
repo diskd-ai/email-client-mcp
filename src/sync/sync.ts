@@ -22,11 +22,7 @@ import { type Account, isOAuthAccount, type WatcherSettings } from "../config/sc
 import { type AppError, errorMessage, type ImapError, imapError } from "../domain/errors.js";
 import { Err, type Result } from "../domain/result.js";
 import { type FetchedMessageLike, toStoredPayload } from "../imap/mapper.js";
-import {
-  patchAttachmentStorageRef,
-  type UploadAttachmentResult,
-  withAttachmentId,
-} from "../store/attachments.js";
+import type { UploadAttachmentResult } from "../store/attachments.js";
 import { externalIdFor, sanitizeMailboxId } from "../store/conventions.js";
 import type { StoredAttachment, StoredEmailPayload, SyncState } from "../store/payloadTypes.js";
 
@@ -82,16 +78,12 @@ export type SyncDeps = {
       accountId: string,
       path: string,
     ) => Promise<Result<ImapError, { uidValidity: number; uidNext: number; messages: number }>>;
-    readonly fetchRange: (
+    readonly fetchMetadataRange: (
       accountId: string,
       path: string,
       fromUid: number,
       toUid: number,
-    ) => AsyncIterable<{
-      readonly imapMessage: FetchedMessageLike;
-      readonly bodyText: string | null;
-      readonly bodyHtml: string | null;
-    }>;
+    ) => AsyncIterable<FetchedMessageLike>;
     readonly fetchEnvelopesRange: (
       accountId: string,
       path: string,
@@ -303,83 +295,36 @@ const syncFolder = async (
     for (const [batchFrom, batchTo] of range(fromUid, toUid)) {
       let sawMessageInBatch = false;
       try {
-        for await (const bundle of deps.imap.fetchRange(
+        for await (const imapMessage of deps.imap.fetchMetadataRange(
           account.name,
           folderPath,
           batchFrom,
           batchTo,
         )) {
           sawMessageInBatch = true;
-          const uid = bundle.imapMessage.uid;
+          const uid = imapMessage.uid;
           const externalId = externalIdFor(status.uidValidity, uid);
-          let payload = toStoredPayload(bundle.imapMessage, {
+          const payload = toStoredPayload(imapMessage, {
             accountId: account.name,
             mailbox: folderPath,
             uidValidity: status.uidValidity,
             fetchedAt: deps.now(),
-            bodyText: bundle.bodyText,
-            bodyHtml: bundle.bodyHtml,
+            bodyText: null,
+            bodyHtml: null,
             truncated: false,
           });
 
-          const initialUpsert = await deps.drive.upsertMessages(
+          const upsert = await deps.drive.upsertMessages(
             mailboxId,
             folderId,
             [payload],
             [externalId],
           );
-          if (initialUpsert.tag === "Err") {
-            return await finishWithError(initialUpsert.error);
+          if (upsert.tag === "Err") {
+            return await finishWithError(upsert.error);
           }
 
-          if (payload.attachments.length === 0) {
-            newMessages += initialUpsert.value.inserted + initialUpsert.value.updated;
-            lastSynced = uid;
-            continue;
-          }
-
-          for (const rawAttachment of payload.attachments) {
-            const attachment = withAttachmentId(rawAttachment, status.uidValidity, uid);
-            const downloaded = await deps.imap.downloadPart(
-              account.name,
-              folderPath,
-              uid,
-              attachment.partId,
-            );
-            const uploadAttachment = {
-              ...attachment,
-              sizeBytes: downloaded.sizeBytes ?? attachment.sizeBytes,
-              contentType: downloaded.contentType ?? attachment.contentType,
-            };
-            const uploaded = await (async () => {
-              try {
-                return await deps.drive.uploadAttachment(
-                  mailboxId,
-                  folderId,
-                  externalId,
-                  uploadAttachment,
-                  downloaded.content,
-                );
-              } finally {
-                downloaded.dispose();
-              }
-            })();
-            if (uploaded.tag === "Err") {
-              return await finishWithError(uploaded.error);
-            }
-            payload = patchAttachmentStorageRef(payload, attachment.attachmentId, uploaded.value);
-          }
-
-          const finalUpsert = await deps.drive.upsertMessages(
-            mailboxId,
-            folderId,
-            [payload],
-            [externalId],
-          );
-          if (finalUpsert.tag === "Err") {
-            return await finishWithError(finalUpsert.error);
-          }
-          newMessages += initialUpsert.value.inserted + initialUpsert.value.updated;
+          newMessages += upsert.value.inserted + upsert.value.updated;
           lastSynced = uid;
         }
       } catch (cause) {

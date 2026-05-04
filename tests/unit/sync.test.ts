@@ -66,6 +66,9 @@ const buildFakeDeps = (
     }>;
     readonly uploadAttachmentSkipsContent?: boolean;
     readonly downloadDisposeCalls?: string[];
+    readonly downloadCalls?: string[];
+    readonly fetchRangeCalls?: string[];
+    readonly fetchMetadataRangeCalls?: string[];
     readonly clock?: () => Date;
   },
 ): SyncDeps => {
@@ -206,17 +209,12 @@ const buildFakeDeps = (
           return Err({ kind: "ImapError", accountId: _acctId, message: "no folder" });
         return Ok({ uidValidity: f.uidValidity, uidNext: f.uidNext, messages: f.msgs.length });
       },
-      fetchRange: async function* (_acctId, path, fromUid, toUid) {
+      fetchMetadataRange: async function* (_acctId, path, fromUid, toUid) {
+        options?.fetchMetadataRangeCalls?.push(`${path}:${fromUid}:${toUid}`);
         const f = imap.messagesByFolder.get(path);
         if (f === undefined) return;
         for (const m of f.msgs) {
-          if (m.uid >= fromUid && m.uid <= toUid) {
-            yield {
-              imapMessage: m,
-              bodyText: "body",
-              bodyHtml: null,
-            };
-          }
+          if (m.uid >= fromUid && m.uid <= toUid) yield m;
         }
       },
       fetchEnvelopesRange: async function* (_acctId, path, fromUid, toUid) {
@@ -226,17 +224,20 @@ const buildFakeDeps = (
           if (m.uid >= fromUid && m.uid <= toUid) yield m;
         }
       },
-      downloadPart: async (_accountId, _path, uid, partId) => ({
-        content: (async function* (): AsyncIterable<Uint8Array> {
-          yield Buffer.from(`uid-${uid}`);
-          yield Buffer.from(`-part-${partId}`);
-        })(),
-        sizeBytes: 12,
-        contentType: null,
-        dispose: () => {
-          options?.downloadDisposeCalls?.push(`${uid}:${partId}`);
-        },
-      }),
+      downloadPart: async (_accountId, _path, uid, partId) => {
+        options?.downloadCalls?.push(`${uid}:${partId}`);
+        return {
+          content: (async function* (): AsyncIterable<Uint8Array> {
+            yield Buffer.from(`uid-${uid}`);
+            yield Buffer.from(`-part-${partId}`);
+          })(),
+          sizeBytes: 12,
+          contentType: null,
+          dispose: () => {
+            options?.downloadDisposeCalls?.push(`${uid}:${partId}`);
+          },
+        };
+      },
     },
     now: options?.clock ?? (() => new Date("2026-04-29T10:00:00.000Z")),
   };
@@ -290,12 +291,14 @@ describe("sync/runSyncOnce", () => {
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(3);
   });
 
-  /* REQUIREMENT end:comm/email-client-mcp/sync -- stores attachment bytes before checkpointing a message */
-  it("uploads attachment streams and patches payload refs before advancing checkpoint", async () => {
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- watcher indexes attachment metadata without downloading/uploading bytes */
+  it("indexes attachment metadata without opening attachment streams", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const uploadedAttachments: NonNullable<
       Parameters<typeof buildFakeDeps>[2]
     >["uploadedAttachments"] = [];
+    const downloadCalls: string[] = [];
+    const fetchMetadataRangeCalls: string[] = [];
     const imap: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: null }],
       messagesByFolder: new Map([
@@ -304,97 +307,31 @@ describe("sync/runSyncOnce", () => {
     };
 
     const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, { uploadedAttachments }),
+      buildFakeDeps(imap, drive, { uploadedAttachments, downloadCalls, fetchMetadataRangeCalls }),
       acct,
       watcherDefault,
     );
 
     expect(rep.error).toBeNull();
-    expect(uploadedAttachments).toEqual([
-      {
-        mailboxId: "exchange-work",
-        folderId: "INBOX",
-        externalId: "14:94",
-        attachmentId: "14:94:2",
-        partId: "2",
-        filename: "file-94.pdf",
-        contentType: "application/pdf",
-        sizeBytes: 12,
-        chunks: ["uid-94", "-part-2"],
-      },
-    ]);
+    expect(fetchMetadataRangeCalls).toEqual(["INBOX:1:50", "INBOX:51:94"]);
+    expect(downloadCalls).toEqual([]);
+    expect(uploadedAttachments).toEqual([]);
     const stored = drive.folders.get("exchange-work")?.get("INBOX");
     const payload = stored?.payloads.get("14:94");
+    expect(payload?.bodyState).toBe("not_loaded");
+    expect(payload?.bodyText).toBeNull();
+    expect(payload?.bodyHtml).toBeNull();
     expect(payload?.attachments[0]).toMatchObject({
       attachmentId: "14:94:2",
-      storedSizeBytes: 12,
-      storedAt: "2026-04-29T10:00:00.000Z",
+      filename: "file-94.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 12,
+      partId: "2",
+      storageState: "not_loaded",
     });
+    expect(payload?.attachments[0]).not.toHaveProperty("storedAt");
     expect(payload?.attachments[0]).not.toHaveProperty("driveInode");
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(94);
-  });
-
-  /* REQUIREMENT end:comm/email-client-mcp/sync -- closes downloaded attachment streams even when upload is idempotent */
-  it("disposes downloaded attachment streams when uploadAttachment does not consume them", async () => {
-    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
-    const downloadDisposeCalls: string[] = [];
-    const imap: FakeImapState = {
-      folders: [{ path: "INBOX", specialUse: null }],
-      messagesByFolder: new Map([
-        ["INBOX", { uidValidity: 14, uidNext: 95, msgs: [mkMsgWithAttachment(94)] }],
-      ]),
-    };
-
-    const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, {
-        uploadAttachmentSkipsContent: true,
-        downloadDisposeCalls,
-      }),
-      acct,
-      watcherDefault,
-    );
-
-    expect(rep.error).toBeNull();
-    expect(downloadDisposeCalls).toEqual(["94:2"]);
-    const stored = drive.folders.get("exchange-work")?.get("INBOX");
-    expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(94);
-  });
-
-  /* REQUIREMENT end:comm/email-client-mcp/sync -- attachment upload failure blocks checkpoint advancement for that UID */
-  it("does not checkpoint a UID whose attachment upload fails", async () => {
-    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
-    const imap: FakeImapState = {
-      folders: [{ path: "INBOX", specialUse: null }],
-      messagesByFolder: new Map([
-        [
-          "INBOX",
-          {
-            uidValidity: 14,
-            uidNext: 97,
-            msgs: [mkMsg(94), mkMsgWithAttachment(95), mkMsgWithAttachment(96)],
-          },
-        ],
-      ]),
-    };
-
-    const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, {
-        uploadAttachmentError: { attachmentId: "14:96:2", message: "upload failed" },
-      }),
-      acct,
-      watcherDefault,
-    );
-
-    expect(rep.error).toContain("upload failed");
-    const stored = drive.folders.get("exchange-work")?.get("INBOX");
-    expect(stored?.messageIds.has("14:94")).toBe(true);
-    expect(stored?.messageIds.has("14:95")).toBe(true);
-    // Drive requires the message row before attachment upload-start, so the
-    // failed UID can have a pre-ref payload row, but it must not be checkpointed.
-    expect(stored?.messageIds.has("14:96")).toBe(true);
-    expect(stored?.payloads.get("14:96")?.attachments[0]?.driveInode).toBeUndefined();
-    expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(95);
-    expect((stored?.metadata as unknown as SyncState).lastSyncError).toContain("upload failed");
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- lastSyncedUid does not advance when upsertBatch fails (next tick replays) */
@@ -476,8 +413,8 @@ describe("sync/runSyncOnce", () => {
     expect(stored?.messageIds.size).toBe(4);
   });
 
-  /* REQUIREMENT end:comm/email-client-mcp/sync -- flag reconciliation preserves body payload fields */
-  it("preserves fetched body when reconciling flags in the same tick", async () => {
+  /* REQUIREMENT end:comm/email-client-mcp/sync -- flag reconciliation preserves metadata-only body state */
+  it("preserves unloaded body state when reconciling flags in the same tick", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const imap: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: null }],
@@ -491,9 +428,10 @@ describe("sync/runSyncOnce", () => {
     expect(rep.error).toBeNull();
     expect(rep.folders[0]?.reconciledFlags).toBe(1);
     const stored = drive.folders.get("exchange-work")?.get("INBOX")?.payloads.get("14:94");
-    expect(stored?.bodyText).toBe("body");
+    expect(stored?.bodyState).toBe("not_loaded");
+    expect(stored?.bodyText).toBeNull();
     expect(stored?.bodyHtml).toBeNull();
-    expect(stored?.snippet).toBe("body");
+    expect(stored?.snippet).toBe("");
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- folders deleted on IMAP are pruned from drive */

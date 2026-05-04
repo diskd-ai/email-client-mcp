@@ -43,8 +43,8 @@ describe("imap/mapper", () => {
     expect(payload.date).toBe("2026-01-01T12:00:00.000Z");
   });
 
-  /* REQUIREMENT end:comm/email-client-mcp/imap/mapper -- attachments collected from bodyStructure (multipart walk) */
-  it("walks bodyStructure and collects attachments", () => {
+  /* REQUIREMENT end:comm/email-client-mcp/imap/mapper -- metadata-only payloads keep body unloaded and attachment handles stable */
+  it("walks bodyStructure and collects unloaded attachments with deterministic handles", () => {
     const msg: FetchedMessageLike = {
       uid: 1,
       bodyStructure: {
@@ -61,10 +61,25 @@ describe("imap/mapper", () => {
         ],
       },
     };
-    const payload = toStoredPayload(msg, baseParams);
+    const payload = toStoredPayload(msg, {
+      ...baseParams,
+      bodyText: null,
+      bodyHtml: null,
+    });
+    expect(payload.bodyState).toBe("not_loaded");
+    expect(payload.bodyText).toBeNull();
+    expect(payload.bodyHtml).toBeNull();
+    expect(payload.snippet).toBe("");
     expect(payload.hasAttachments).toBe(true);
     expect(payload.attachments).toEqual([
-      { filename: "report.pdf", contentType: "application/pdf", sizeBytes: 1234, partId: "2" },
+      {
+        attachmentId: "999:1:2",
+        filename: "report.pdf",
+        contentType: "application/pdf",
+        sizeBytes: 1234,
+        partId: "2",
+        storageState: "not_loaded",
+      },
     ]);
   });
 
@@ -82,6 +97,7 @@ describe("imap/mapper", () => {
   it("builds a snippet from the text body", () => {
     const msg: FetchedMessageLike = { uid: 1 };
     const payload = toStoredPayload(msg, { ...baseParams, bodyText: "one\ntwo\n  three   spaces" });
+    expect(payload.bodyState).toBe("loaded");
     expect(payload.snippet).toBe("one two three spaces");
   });
 

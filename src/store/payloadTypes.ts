@@ -13,14 +13,30 @@ export type EmailAddress = {
   readonly address: string;
 };
 
+export type BodyState =
+  | "not_loaded"
+  | "loading"
+  | "loaded"
+  | "failed_retryable"
+  | "failed_permanent";
+
+export type AttachmentStorageState =
+  | "not_loaded"
+  | "loading"
+  | "loaded"
+  | "failed_retryable"
+  | "failed_permanent";
+
 export type StoredAttachment = {
   readonly filename: string;
   readonly contentType: string;
   readonly sizeBytes: number;
   readonly partId: string;
   readonly attachmentId?: string;
+  readonly storageState?: AttachmentStorageState;
   readonly storedSizeBytes?: number;
   readonly storedAt?: string;
+  readonly lastLoadError?: string;
 };
 
 export type StoredEmailPayload = {
@@ -44,6 +60,9 @@ export type StoredEmailPayload = {
   readonly bodyText: string | null;
   readonly bodyHtml: string | null;
   readonly truncated: boolean;
+  readonly bodyState?: BodyState;
+  readonly bodyFetchedAt?: string | null;
+  readonly bodyFetchError?: string | null;
   readonly fetchedAt: string;
 };
 

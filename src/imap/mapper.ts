@@ -5,6 +5,7 @@
  * real IMAP connection.
  */
 
+import { attachmentIdFor } from "../store/attachments.js";
 import type { EmailAddress, StoredAttachment, StoredEmailPayload } from "../store/payloadTypes.js";
 
 const MAX_BODY_BYTES = 1_048_576; // 1 MiB cap per body part to keep store payloads small
@@ -129,7 +130,14 @@ export const toStoredPayload = (
   collectAttachments(msg.bodyStructure, attachments);
   const bodyText = truncateBody(params.bodyText);
   const bodyHtml = truncateBody(params.bodyHtml);
+  const bodyLoaded = bodyText.value !== null || bodyHtml.value !== null;
   const fallbackDate = msg.internalDate ?? params.fetchedAt;
+  const attachmentsWithState = attachments.map((attachment) => ({
+    ...attachment,
+    attachmentId:
+      attachment.attachmentId ?? attachmentIdFor(params.uidValidity, msg.uid, attachment.partId),
+    storageState: attachment.storageState ?? "not_loaded",
+  }));
 
   return {
     accountId: params.accountId,
@@ -146,12 +154,15 @@ export const toStoredPayload = (
     date: toIso(env.date, fallbackDate),
     flags: flagArray(msg.flags),
     labels: flagArray(msg.labels),
-    hasAttachments: attachments.length > 0,
-    attachments,
+    hasAttachments: attachmentsWithState.length > 0,
+    attachments: attachmentsWithState,
     snippet: buildSnippet(bodyText.value),
     bodyText: bodyText.value,
     bodyHtml: bodyHtml.value,
     truncated: bodyText.truncated || bodyHtml.truncated || params.truncated,
+    bodyState: bodyLoaded ? "loaded" : "not_loaded",
+    bodyFetchedAt: bodyLoaded ? params.fetchedAt.toISOString() : null,
+    bodyFetchError: null,
     fetchedAt: params.fetchedAt.toISOString(),
   };
 };

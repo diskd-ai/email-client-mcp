@@ -281,7 +281,33 @@ const toLike = (msg: FetchMessageObject): FetchedMessageLike => ({
 });
 
 /**
- * UID-range fetch for the watcher. Yields envelope + flags + bodyStructure
+ * UID-range metadata fetch for the watcher. Yields envelope + flags +
+ * bodyStructure without fetching display body parts and without setting
+ * `\\Seen`. This is the fast mailbox index path.
+ */
+export async function* fetchMetadataUidRange(
+  client: ImapFlow,
+  fromUid: number,
+  toUid: number,
+): AsyncIterable<FetchedMessageLike> {
+  const range = `${fromUid}:${toUid}`;
+  for await (const msg of client.fetch(
+    range,
+    {
+      uid: true,
+      flags: true,
+      envelope: true,
+      bodyStructure: true,
+      internalDate: true,
+    },
+    { uid: true },
+  )) {
+    yield toLike(msg);
+  }
+}
+
+/**
+ * UID-range fetch for body hydration. Yields envelope + flags + bodyStructure
  * plus display body parts without setting `\\Seen`.
  */
 export async function* fetchUidRange(

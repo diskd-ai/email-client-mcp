@@ -24,7 +24,7 @@ import { Err, Ok, type Result } from "./domain/result.js";
 import {
   downloadPartByUid,
   fetchEnvelopesUidRange,
-  fetchUidRange,
+  fetchMetadataUidRange,
   folderStatus,
   withMailboxLock,
 } from "./imap/fetch.js";
@@ -113,14 +113,14 @@ const main = async (): Promise<void> => {
           } as ImapError);
         }
       },
-      fetchRange: async function* (accountId, path, fromUid, toUid) {
+      fetchMetadataRange: async function* (accountId, path, fromUid, toUid) {
         const c = await pool.forAccount(accountId);
         if (c.tag === "Err") throw new Error(errorMessage(c.error));
         // Buffer under-lock, yield after release. Batch sizes are
         // bounded (sync uses 50) so the cost is acceptable.
         const buf = await withMailboxLock(c.value, path, async () => {
           const out: unknown[] = [];
-          for await (const m of fetchUidRange(c.value, fromUid, toUid)) out.push(m);
+          for await (const m of fetchMetadataUidRange(c.value, fromUid, toUid)) out.push(m);
           return out;
         });
         for (const m of buf) yield m as never;
