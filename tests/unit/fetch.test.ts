@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   decodeMimeBodyPart,
+  fetchDisplayBodyByUid,
   fetchMetadataUidRange,
   findDisplayBodyPartIds,
 } from "../../src/imap/fetch.js";
@@ -47,6 +48,64 @@ describe("imap/fetch metadata-only range", () => {
         },
         { uid: true },
       ],
+    ]);
+  });
+});
+
+describe("imap/fetch display body hydration", () => {
+  /* REQUIREMENT end:comm/email-client-mcp/imap/fetch -- body hydration fetches display parts without downloading attachments */
+  it("fetches display body parts by UID and never calls attachment download", async () => {
+    const fetchOneCalls: unknown[] = [];
+    const client = {
+      fetchOne: async (...args: unknown[]) => {
+        fetchOneCalls.push(args);
+        if (fetchOneCalls.length === 1) {
+          return {
+            uid: 42,
+            bodyStructure: {
+              type: "multipart/mixed",
+              childNodes: [
+                {
+                  part: "1",
+                  type: "text/plain",
+                  encoding: "7bit",
+                  parameters: { charset: "utf-8" },
+                },
+                {
+                  part: "2",
+                  type: "application/pdf",
+                  disposition: "attachment",
+                  dispositionParameters: { filename: "report.pdf" },
+                },
+              ],
+            },
+          };
+        }
+        return {
+          uid: 42,
+          bodyParts: new Map([["1", Buffer.from("Hello body", "utf8")]]),
+        };
+      },
+      download: async () => {
+        throw new Error("body hydration must not download attachments");
+      },
+    };
+
+    const body = await fetchDisplayBodyByUid(client as never, 42);
+
+    expect(body).toEqual({
+      bodyText: "Hello body",
+      bodyHtml: null,
+      truncated: false,
+      bytesRead: 10,
+    });
+    expect(fetchOneCalls).toEqual([
+      [
+        "42",
+        { uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true },
+        { uid: true },
+      ],
+      ["42", { uid: true, bodyParts: ["1"] }, { uid: true }],
     ]);
   });
 });

@@ -60,6 +60,29 @@ export const toolInputError = (message: string): ToolInputError => ({
   message,
 });
 
+const causeMessage = (cause: unknown): string => {
+  if (cause instanceof Error) return cause.message;
+  if (typeof cause === "string") return cause;
+  try {
+    return JSON.stringify(cause);
+  } catch {
+    return String(cause);
+  }
+};
+
+export const isGmailThrottledError = (cause: unknown): boolean =>
+  /\bTHROTTLED\b|Some messages could not be FETCHed/i.test(causeMessage(cause));
+
+export const isRetryableImapError = (cause: unknown): boolean => {
+  const msg = causeMessage(cause);
+  return (
+    isGmailThrottledError(cause) ||
+    /timeout|timed out|ECONNRESET|ETIMEDOUT|EPIPE|socket closed|socket hang up|temporarily unavailable|rate limit|too many requests/i.test(
+      msg,
+    )
+  );
+};
+
 export const errorMessage = (e: AppError): string => {
   switch (e.kind) {
     case "ConfigError":

@@ -263,6 +263,13 @@ export type FetchedEnvelopeBundle = {
   readonly bodyHtml: string | null;
 };
 
+export type FetchedDisplayBody = {
+  readonly bodyText: string | null;
+  readonly bodyHtml: string | null;
+  readonly truncated: boolean;
+  readonly bytesRead: number;
+};
+
 const toInternalDate = (raw: Date | string | undefined): Date | undefined => {
   if (raw instanceof Date) return raw;
   if (typeof raw === "string" && raw.length > 0) {
@@ -366,6 +373,23 @@ export const fetchOneByUid = async (
     imapMessage: toLike(msg),
     bodyText: bodies.bodyText,
     bodyHtml: bodies.bodyHtml,
+  };
+};
+
+export const fetchDisplayBodyByUid = async (
+  client: ImapFlow,
+  uid: number,
+): Promise<FetchedDisplayBody | null> => {
+  const bundle = await fetchOneByUid(client, uid);
+  if (bundle === null) return null;
+  const bytesRead =
+    Buffer.byteLength(bundle.bodyText ?? "", "utf8") +
+    Buffer.byteLength(bundle.bodyHtml ?? "", "utf8");
+  return {
+    bodyText: bundle.bodyText,
+    bodyHtml: bundle.bodyHtml,
+    truncated: false,
+    bytesRead,
   };
 };
 
