@@ -1,6 +1,9 @@
+import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
+import { isRetryableImapError } from "../../src/domain/errors.js";
 import {
   decodeMimeBodyPart,
+  downloadPartByUid,
   fetchDisplayBodyByUid,
   fetchMetadataUidRange,
   findDisplayBodyPartIds,
@@ -107,6 +110,72 @@ describe("imap/fetch display body hydration", () => {
       ],
       ["42", { uid: true, bodyParts: ["1"] }, { uid: true }],
     ]);
+  });
+});
+
+describe("imap/fetch attachment download", () => {
+  /* REQUIREMENT end:comm/email-client-mcp/imap/fetch -- attachment stream errors are captured before consumers start reading */
+  it("captures upload stream errors emitted before consumption and releases the mailbox lock", async () => {
+    let released = 0;
+    let downloadCalls = 0;
+    const uploadStream = new Readable({ read() {} });
+    const client = {
+      getMailboxLock: async () => ({
+        release: () => {
+          released += 1;
+        },
+      }),
+      download: async () => {
+        downloadCalls += 1;
+        if (downloadCalls === 1) {
+          return {
+            content: Readable.from([Buffer.from("probe")]),
+            meta: { contentType: "application/pdf" },
+          };
+        }
+        return { content: uploadStream, meta: { contentType: "application/pdf" } };
+      },
+    };
+
+    const downloaded = await downloadPartByUid(client as never, "INBOX", 42, "2");
+    const streamError = new Error("Some messages could not be FETCHed (Failure) [THROTTLED]");
+
+    expect(() => uploadStream.emit("error", streamError)).not.toThrow();
+    await expect(
+      (async () => {
+        for await (const _chunk of downloaded.content) {
+          // consume
+        }
+      })(),
+    ).rejects.toThrow(/THROTTLED/);
+
+    expect(released).toBe(2);
+    expect(isRetryableImapError(streamError)).toBe(true);
+  });
+
+  it("releases the mailbox lock when the probe stream fails", async () => {
+    let released = 0;
+    const client = {
+      getMailboxLock: async () => ({
+        release: () => {
+          released += 1;
+        },
+      }),
+      download: async () => ({
+        content: Readable.from(
+          (async function* () {
+            yield Buffer.from("partial");
+            throw new Error("probe failed");
+          })(),
+        ),
+        meta: { contentType: "application/pdf" },
+      }),
+    };
+
+    await expect(downloadPartByUid(client as never, "INBOX", 42, "2")).rejects.toThrow(
+      /probe failed/,
+    );
+    expect(released).toBe(1);
   });
 });
 

@@ -417,9 +417,31 @@ const openDownloadedPartByUid = async (
 
   try {
     const downloaded = await client.download(String(uid), partId, { uid: true });
+    const rawContent = downloaded.content as AsyncIterable<unknown> & {
+      readonly on?: (event: "error", listener: (cause: unknown) => void) => unknown;
+      readonly off?: (event: "error", listener: (cause: unknown) => void) => unknown;
+      readonly removeListener?: (event: "error", listener: (cause: unknown) => void) => unknown;
+      readonly destroy?: () => unknown;
+    };
+    let capturedStreamError: unknown = null;
+    const captureStreamError = (cause: unknown): void => {
+      capturedStreamError ??= cause;
+    };
+    rawContent.on?.("error", captureStreamError);
+    const detachStreamErrorCapture = (): void => {
+      rawContent.off?.("error", captureStreamError) ??
+        rawContent.removeListener?.("error", captureStreamError);
+    };
+    const dispose = (): void => {
+      rawContent.destroy?.();
+      detachStreamErrorCapture();
+      release();
+    };
     const content = async function* (): AsyncIterable<Uint8Array> {
       try {
-        for await (const chunk of downloaded.content) {
+        if (capturedStreamError !== null) throw capturedStreamError;
+        for await (const chunk of rawContent) {
+          if (capturedStreamError !== null) throw capturedStreamError;
           if (typeof chunk === "string") {
             yield Buffer.from(chunk);
           } else if (chunk instanceof Uint8Array) {
@@ -428,15 +450,18 @@ const openDownloadedPartByUid = async (
             yield Buffer.from(chunk as ArrayBuffer);
           }
         }
+        if (capturedStreamError !== null) throw capturedStreamError;
+      } catch (cause) {
+        throw capturedStreamError ?? cause;
       } finally {
-        release();
+        dispose();
       }
     };
     return {
       content: content(),
       sizeBytes: null,
       contentType: downloaded.meta.contentType || null,
-      dispose: release,
+      dispose,
     };
   } catch (cause) {
     release();
