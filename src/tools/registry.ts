@@ -11,6 +11,7 @@ import type { Account } from "../config/schema.js";
 import { type AppError, errorMessage } from "../domain/errors.js";
 import type { Result } from "../domain/result.js";
 import type { ImapPool } from "../imap/pool.js";
+import type { AttachmentHydrationDeps } from "../sync/attachmentHydration.js";
 import type { BodyHydrationDeps } from "../sync/bodyHydration.js";
 import type { Watcher } from "../sync/watcher.js";
 import { bulkAction, bulkActionInput } from "./bulkAction.js";
@@ -22,6 +23,10 @@ import { listAccounts, listAccountsInput } from "./listAccounts.js";
 import { listEmails, listEmailsInput } from "./listEmails.js";
 import { listMailboxFolder, listMailboxFolderInput } from "./listMailboxFolder.js";
 import { moveEmail, moveEmailInput } from "./moveEmail.js";
+import {
+  systemHydrateEmailAttachment,
+  systemHydrateEmailAttachmentInput,
+} from "./systemHydrateEmailAttachment.js";
 import {
   systemHydrateEmailBodies,
   systemHydrateEmailBodiesInput,
@@ -49,6 +54,7 @@ export type ToolDeps = {
   readonly imapPool: ImapPool;
   readonly watcher: Watcher;
   readonly bodyHydration: BodyHydrationDeps;
+  readonly attachmentHydration: AttachmentHydrationDeps;
 };
 
 export const registerTools = (server: McpServer, deps: ToolDeps): void => {
@@ -140,6 +146,16 @@ export const registerTools = (server: McpServer, deps: ToolDeps): void => {
       inputSchema: systemHydrateEmailBodiesInput.shape,
     },
     async (args) => fromResult(await systemHydrateEmailBodies(deps.bodyHydration, args)),
+  );
+
+  server.registerTool(
+    "system_hydrate_email_attachment",
+    {
+      description:
+        "System-only: hydrate one cached email attachment in Drive messagesStore by mailboxId/folderId/externalId/attachmentId refs. Not intended for ordinary agent planning.",
+      inputSchema: systemHydrateEmailAttachmentInput.shape,
+    },
+    async (args) => fromResult(await systemHydrateEmailAttachment(deps.attachmentHydration, args)),
   );
 
   server.registerTool(

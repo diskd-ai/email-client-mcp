@@ -32,6 +32,7 @@ import {
 import { buildImapPool } from "./imap/pool.js";
 import { buildDiskd } from "./sdk/diskdClient.js";
 import { buildDriveStore } from "./store/driveStore.js";
+import type { AttachmentHydrationDeps } from "./sync/attachmentHydration.js";
 import type { BodyHydrationDeps } from "./sync/bodyHydration.js";
 import type { SyncDeps } from "./sync/sync.js";
 import { buildWatcher } from "./sync/watcher.js";
@@ -168,6 +169,10 @@ const main = async (): Promise<void> => {
     imap: { fetchBody: syncDeps.imap.fetchBody },
     now: () => new Date(),
   };
+  const attachmentHydrationDeps: AttachmentHydrationDeps = {
+    drive: driveStore as unknown as AttachmentHydrationDeps["drive"],
+    imap: { downloadPart: syncDeps.imap.downloadPart },
+  };
 
   const watcher = buildWatcher(syncDeps, cfg.value.accounts, cfg.value.watcher, log);
 
@@ -181,6 +186,7 @@ const main = async (): Promise<void> => {
     imapPool: pool,
     watcher,
     bodyHydration: bodyHydrationDeps,
+    attachmentHydration: attachmentHydrationDeps,
   });
 
   const transport = new StdioServerTransport();
