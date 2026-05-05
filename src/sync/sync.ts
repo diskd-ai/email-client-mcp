@@ -119,6 +119,7 @@ export type SyncDeps = {
     }>;
   };
   readonly now: () => Date;
+  readonly log?: (msg: string, extra?: Readonly<Record<string, unknown>>) => void;
   readonly notifier?: {
     readonly notifyEmailPersisted: (event: {
       readonly accountId: string;
@@ -562,8 +563,14 @@ const syncFolder = async (
       if (deps.notifier && persistedForwardInboxEvents.length > 0) {
         for (const event of persistedForwardInboxEvents) {
           try {
+            deps.log?.("signal.notify-start", event);
             await deps.notifier.notifyEmailPersisted(event);
-          } catch {
+            deps.log?.("signal.notify-ok", event);
+          } catch (cause) {
+            deps.log?.("signal.notify-err", {
+              ...event,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
             // Best-effort post-checkpoint notification. app-service publishes
             // deterministic event ids, so duplicate/replayed notifications are safe.
           }

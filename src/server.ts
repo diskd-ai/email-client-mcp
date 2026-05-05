@@ -79,6 +79,14 @@ const main = async (): Promise<void> => {
 
   const signalEndpoint = process.env.EMAIL_CLIENT_MCP_SIGNAL_ENDPOINT;
   const signalApiKey = process.env.EMAIL_CLIENT_MCP_SIGNAL_API_KEY;
+  if (signalEndpoint) {
+    log("signal notifier configured", {
+      endpoint: signalEndpoint,
+      hasApiKey: Boolean(signalApiKey),
+    });
+  } else {
+    log("signal notifier disabled", { reason: "EMAIL_CLIENT_MCP_SIGNAL_ENDPOINT is not set" });
+  }
   const notifier: SyncDeps["notifier"] = signalEndpoint
     ? {
         notifyEmailPersisted: async (event) => {
@@ -90,8 +98,11 @@ const main = async (): Promise<void> => {
             },
             body: JSON.stringify({ workspaceId: diskd.value.workspaceId, ...event }),
           });
+          const responseText = await response.text();
           if (!response.ok) {
-            throw new Error(`signal notify failed (${response.status}): ${await response.text()}`);
+            throw new Error(
+              `signal notify failed (${response.status}): ${responseText.slice(0, 500)}`,
+            );
           }
         },
       }
@@ -182,6 +193,7 @@ const main = async (): Promise<void> => {
       },
     },
     now: () => new Date(),
+    log,
     notifier,
   };
 

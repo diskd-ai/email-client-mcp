@@ -84,6 +84,7 @@ const buildFakeDeps = (
     readonly fetchBodyErrors?: ReadonlyMap<number, ImapError>;
     readonly notifyCalls?: string[];
     readonly notifyError?: Error;
+    readonly syncLogs?: string[];
     readonly clock?: () => Date;
   },
 ): SyncDeps => {
@@ -266,6 +267,11 @@ const buildFakeDeps = (
       },
     },
     now: options?.clock ?? (() => new Date("2026-04-29T10:00:00.000Z")),
+    log: options?.syncLogs
+      ? (msg, extra) => {
+          options.syncLogs?.push(`${msg}:${JSON.stringify(extra ?? {})}`);
+        }
+      : undefined,
     notifier: options?.notifyCalls
       ? {
           notifyEmailPersisted: async (event) => {
@@ -330,6 +336,7 @@ describe("sync/runSyncOnce", () => {
   it("notifies app-service after forward INBOX messages are stored and checkpointed", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const notifyCalls: string[] = [];
+    const syncLogs: string[] = [];
     const imap: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
       messagesByFolder: new Map([
@@ -338,7 +345,7 @@ describe("sync/runSyncOnce", () => {
     };
 
     const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, { notifyCalls }),
+      buildFakeDeps(imap, drive, { notifyCalls, syncLogs }),
       acct,
       watcherDefault,
     );
@@ -347,6 +354,12 @@ describe("sync/runSyncOnce", () => {
     expect(notifyCalls).toEqual([
       "work:exchange-work:INBOX:100:1",
       "work:exchange-work:INBOX:100:2",
+    ]);
+    expect(syncLogs).toEqual([
+      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:1"}',
+      'signal.notify-ok:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:1"}',
+      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:2"}',
+      'signal.notify-ok:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:2"}',
     ]);
     const state = drive.folders.get("exchange-work")?.get("INBOX")
       ?.metadata as unknown as SyncState;
@@ -380,13 +393,18 @@ describe("sync/runSyncOnce", () => {
   it("does not fail sync when notification fails", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const notifyCalls: string[] = [];
+    const syncLogs: string[] = [];
     const imap: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
       messagesByFolder: new Map([["INBOX", { uidValidity: 100, uidNext: 2, msgs: [mkMsg(1)] }]]),
     };
 
     const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, { notifyCalls, notifyError: new Error("notify down") }),
+      buildFakeDeps(imap, drive, {
+        notifyCalls,
+        notifyError: new Error("notify down"),
+        syncLogs,
+      }),
       acct,
       watcherDefault,
     );
@@ -394,6 +412,10 @@ describe("sync/runSyncOnce", () => {
     expect(rep.error).toBeNull();
     expect(rep.folders[0]?.error).toBeNull();
     expect(notifyCalls).toEqual(["work:exchange-work:INBOX:100:1"]);
+    expect(syncLogs).toEqual([
+      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:1"}',
+      'signal.notify-err:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:1","error":"notify down"}',
+    ]);
   });
 
   it("does not notify for historical backfill or non-INBOX folders", async () => {
