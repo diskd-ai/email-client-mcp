@@ -80,6 +80,7 @@ const buildFakeDeps = (
     readonly downloadCalls?: string[];
     readonly fetchRangeCalls?: string[];
     readonly fetchMetadataRangeCalls?: string[];
+    readonly fetchEnvelopeRangeCalls?: string[];
     readonly fetchBodyCalls?: string[];
     readonly fetchBodyErrors?: ReadonlyMap<number, ImapError>;
     readonly notifyCalls?: string[];
@@ -234,6 +235,7 @@ const buildFakeDeps = (
         }
       },
       fetchEnvelopesRange: async function* (_acctId, path, fromUid, toUid) {
+        options?.fetchEnvelopeRangeCalls?.push(`${path}:${fromUid}:${toUid}`);
         const f = imap.messagesByFolder.get(path);
         if (f === undefined) return;
         for (const m of f.msgs) {
@@ -516,7 +518,7 @@ describe("sync/runSyncOnce", () => {
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- new forward mail is indexed before historical backfill */
-  it("indexes new forward mail before running historical backfill", async () => {
+  it("indexes new forward mail and defers historical backfill to a later tick", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const firstMessages = Array.from({ length: 10_000 }, (_, i) => mkMsg(i + 1));
     const imap1: FakeImapState = {
@@ -542,12 +544,22 @@ describe("sync/runSyncOnce", () => {
     );
 
     expect(rep.error).toBeNull();
-    expect(fetchMetadataRangeCalls[0]).toBe("INBOX:10001:10002");
-    expect(fetchMetadataRangeCalls[1]).toBe("INBOX:8951:9000");
+    expect(fetchMetadataRangeCalls).toEqual(["INBOX:10001:10002"]);
     const stored = drive.folders.get("exchange-work")?.get("INBOX");
     const state = stored?.metadata as unknown as SyncState;
     expect(state.forwardSyncedUid).toBe(10_002);
-    expect(state.backfillBeforeUid).toBe(8501);
+    expect(state.backfillBeforeUid).toBe(9001);
+
+    fetchMetadataRangeCalls.length = 0;
+    await runSyncOnce(
+      buildFakeDeps(imap2, drive, { fetchMetadataRangeCalls }),
+      acct,
+      watcherDefault,
+    );
+    expect(fetchMetadataRangeCalls[0]).toBe("INBOX:8951:9000");
+    expect(fetchMetadataRangeCalls.at(-1)).toBe("INBOX:8501:8550");
+    const nextState = stored?.metadata as unknown as SyncState;
+    expect(nextState.backfillBeforeUid).toBe(8501);
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- partial legacy lastSyncedUid state migrates to recent-first instead of continuing old-first */
@@ -623,6 +635,43 @@ describe("sync/runSyncOnce", () => {
       "Archive",
       "[Gmail]/All Mail",
     ]);
+  });
+
+  it("limits historical backfill and flag reconciliation to one maintenance folder per tick", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const inboxMessages = Array.from({ length: 20 }, (_, i) => mkMsg(i + 1));
+    const archiveMessages = Array.from({ length: 20 }, (_, i) => mkMsg(i + 1));
+    const imap: FakeImapState = {
+      folders: [
+        { path: "Archive", specialUse: null },
+        { path: "INBOX", specialUse: "\\Inbox" },
+      ],
+      messagesByFolder: new Map([
+        ["Archive", { uidValidity: 10, uidNext: 21, msgs: archiveMessages }],
+        ["INBOX", { uidValidity: 10, uidNext: 21, msgs: inboxMessages }],
+      ]),
+    };
+    const watcher: WatcherSettings = {
+      ...watcherDefault,
+      flag_reconcile_window: 5,
+      recent_first: { enabled: true, initial_recent_window: 2, backfill_window_per_tick: 2 },
+    };
+
+    await runSyncOnce(buildFakeDeps(imap, drive), acct, watcher);
+
+    const fetchMetadataRangeCalls: string[] = [];
+    const fetchEnvelopeRangeCalls: string[] = [];
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { fetchMetadataRangeCalls, fetchEnvelopeRangeCalls }),
+      acct,
+      watcher,
+    );
+
+    expect(rep.error).toBeNull();
+    expect(fetchMetadataRangeCalls).toEqual(["INBOX:17:18"]);
+    expect(fetchEnvelopeRangeCalls).toEqual(["INBOX:16:20"]);
+    expect(rep.folders.find((folder) => folder.folderId === "Archive")?.backfilledMessages).toBe(0);
+    expect(rep.folders.find((folder) => folder.folderId === "Archive")?.reconciledFlags).toBe(0);
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- watcher indexes attachment metadata without downloading/uploading bytes */
@@ -885,12 +934,14 @@ describe("sync/runSyncOnce", () => {
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- flag reconciliation preserves metadata-only body state */
-  it("preserves unloaded body state when reconciling flags in the same tick", async () => {
+  it("preserves unloaded body state when reconciling flags in a maintenance tick", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const imap: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: null }],
       messagesByFolder: new Map([["INBOX", { uidValidity: 14, uidNext: 95, msgs: [mkMsg(94)] }]]),
     };
+    await runSyncOnce(buildFakeDeps(imap, drive), acct, watcherDefault);
+
     const rep = await runSyncOnce(buildFakeDeps(imap, drive), acct, {
       ...watcherDefault,
       flag_reconcile_window: 100,

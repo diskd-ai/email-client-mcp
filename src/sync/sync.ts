@@ -279,6 +279,10 @@ const sortFoldersByPriority = <
  * Sync one folder. Returns the per-folder report; never throws.
  * `lastSyncedUid` is advanced only after each successful batch upsert.
  */
+type SyncFolderOptions = {
+  readonly runMaintenance: boolean;
+};
+
 const syncFolder = async (
   deps: SyncDeps,
   account: Account,
@@ -286,6 +290,7 @@ const syncFolder = async (
   folderPath: string,
   specialUse: string | null,
   watcher: WatcherSettings,
+  options: SyncFolderOptions,
 ): Promise<SyncFolderReport> => {
   const folderId = folderPath;
   const startIso = deps.now().toISOString();
@@ -598,6 +603,8 @@ const syncFolder = async (
     }
 
     if (
+      options.runMaintenance &&
+      forwardMessages === 0 &&
       !needsRecentBootstrap &&
       recentFirst.enabled &&
       recentFirst.backfill_window_per_tick > 0 &&
@@ -639,7 +646,12 @@ const syncFolder = async (
 
   // Sliding-window flag reconciliation. Bounds drift to flagWindow UIDs.
   let reconciledFlags = 0;
-  if (flagWindow > 0 && state.forwardSyncedUid > 0) {
+  if (
+    options.runMaintenance &&
+    forwardMessages === 0 &&
+    flagWindow > 0 &&
+    state.forwardSyncedUid > 0
+  ) {
     const reconTo = state.forwardSyncedUid;
     const reconFrom = Math.max(1, reconTo - flagWindow + 1);
     try {
@@ -770,9 +782,17 @@ export const runSyncOnce = async (
     })(),
   );
 
+  const maintenanceIndex =
+    filteredFolders.length === 0
+      ? -1
+      : Math.floor(deps.now().getTime() / watcher.interval_ms) % filteredFolders.length;
+
   const reports: SyncFolderReport[] = [];
-  for (const f of filteredFolders) {
-    const r = await syncFolder(deps, account, mailboxId, f.path, f.specialUse, watcher);
+  for (let i = 0; i < filteredFolders.length; i += 1) {
+    const f = filteredFolders[i] as (typeof filteredFolders)[number];
+    const r = await syncFolder(deps, account, mailboxId, f.path, f.specialUse, watcher, {
+      runMaintenance: i === maintenanceIndex,
+    });
     reports.push(r);
   }
 
