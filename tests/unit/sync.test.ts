@@ -1023,11 +1023,10 @@ describe("sync/runSyncOnce", () => {
     };
     const getMessageCalls: string[] = [];
 
-    const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, { getMessageCalls }),
-      acct,
-      { ...watcherDefault, flag_reconcile_window: 100 },
-    );
+    const rep = await runSyncOnce(buildFakeDeps(imap, drive, { getMessageCalls }), acct, {
+      ...watcherDefault,
+      flag_reconcile_window: 100,
+    });
 
     expect(rep.error).toBeNull();
     expect(rep.folders[0]?.reconciledFlags).toBe(1);

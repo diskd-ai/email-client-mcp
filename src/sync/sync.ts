@@ -229,9 +229,7 @@ const descendingRange = (lo: number, hi: number): readonly [number, number][] =>
   return out;
 };
 
-const reconciledFlagPatch = (
-  incoming: StoredEmailPayload,
-): Readonly<Record<string, unknown>> => ({
+const reconciledFlagPatch = (incoming: StoredEmailPayload): Readonly<Record<string, unknown>> => ({
   flags: incoming.flags,
   labels: incoming.labels,
   fetchedAt: incoming.fetchedAt,

@@ -226,7 +226,6 @@ describe("store/buildDriveStore patchMessages", () => {
   });
 });
 
-
 describe("store/buildDriveStore attachment upload", () => {
   beforeEach(() => {
     process.env.APIS_BASE_URL = "https://app.example.test";
