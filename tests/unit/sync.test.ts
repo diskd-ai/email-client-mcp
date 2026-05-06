@@ -84,6 +84,7 @@ const buildFakeDeps = (
     readonly fetchBodyCalls?: string[];
     readonly fetchBodyErrors?: ReadonlyMap<number, ImapError>;
     readonly getMessageCalls?: string[];
+    readonly upsertMessagesCalls?: string[];
     readonly patchMessagesCalls?: string[];
     readonly notifyCalls?: string[];
     readonly notifyError?: Error;
@@ -141,6 +142,7 @@ const buildFakeDeps = (
       },
       upsertMessages: async (mailboxId, folderId, payloads, externalIds) => {
         upsertCalls += 1;
+        options?.upsertMessagesCalls?.push(`${mailboxId}:${folderId}:${payloads.length}`);
         if (
           options?.upsertMessagesError !== undefined &&
           options.upsertMessagesError.triggerOnCallNumber === upsertCalls
@@ -343,18 +345,20 @@ describe("sync/runSyncOnce", () => {
   /* REQUIREMENT end:comm/email-client-mcp/sync -- syncs new UIDs to messagesStore on a fresh folder */
   it("upserts all new messages on a fresh folder", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const upsertMessagesCalls: string[] = [];
     const imap: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: null }],
       messagesByFolder: new Map([
         ["INBOX", { uidValidity: 100, uidNext: 4, msgs: [mkMsg(1), mkMsg(2), mkMsg(3)] }],
       ]),
     };
-    const deps = buildFakeDeps(imap, drive);
+    const deps = buildFakeDeps(imap, drive, { upsertMessagesCalls });
     const rep = await runSyncOnce(deps, acct, watcherDefault);
     expect(rep.error).toBeNull();
     expect(rep.folders).toHaveLength(1);
     expect(rep.folders[0]?.newMessages).toBe(3);
     const stored = drive.folders.get("exchange-work")?.get("INBOX");
+    expect(upsertMessagesCalls).toEqual(["exchange-work:INBOX:3"]);
     expect(stored?.messageIds.size).toBe(3);
     expect(stored?.messageIds.has("100:1")).toBe(true);
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(3);
@@ -887,10 +891,9 @@ describe("sync/runSyncOnce", () => {
       folders: [{ path: "INBOX", specialUse: null }],
       messagesByFolder: new Map([["INBOX", { uidValidity: 1, uidNext: 76, msgs: messages }]]),
     };
-    // Fail on UID 51 (after 50 messages succeed). New-message sync is
-    // message-correct even though checkpoint writes remain batched.
+    // Fail on the second Drive batch (after 50 messages succeed).
     const deps = buildFakeDeps(imap, drive, {
-      upsertMessagesError: { triggerOnCallNumber: 51, message: "drive 503" },
+      upsertMessagesError: { triggerOnCallNumber: 2, message: "drive 503" },
     });
     const rep = await runSyncOnce(deps, acct, watcherDefault);
     expect(rep.error).toContain("drive 503");

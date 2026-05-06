@@ -469,6 +469,15 @@ const syncFolder = async (
         readonly folderId: string;
         readonly externalId: string;
       }> = [];
+      const batchPayloads: StoredEmailPayload[] = [];
+      const batchExternalIds: string[] = [];
+      const batchBodyHydrationCandidates: BodyHydrationRef[] = [];
+      const batchForwardInboxEvents: Array<{
+        readonly accountId: string;
+        readonly mailboxId: string;
+        readonly folderId: string;
+        readonly externalId: string;
+      }> = [];
       try {
         for await (const imapMessage of deps.imap.fetchMetadataRange(
           account.name,
@@ -489,31 +498,18 @@ const syncFolder = async (
             truncated: false,
           });
 
-          const upsert = await deps.drive.upsertMessages(
-            mailboxId,
-            folderId,
-            [payload],
-            [externalId],
-          );
-          if (upsert.tag === "Err") {
-            return await finishWithError(upsert.error);
+          batchPayloads.push(payload);
+          batchExternalIds.push(externalId);
+          if (mode === "forward" && folderId === "INBOX") {
+            batchForwardInboxEvents.push({
+              accountId: account.name,
+              mailboxId,
+              folderId,
+              externalId,
+            });
           }
-
-          const changed = upsert.value.inserted + upsert.value.updated;
-          newMessages += changed;
-          if (mode === "forward") {
-            forwardMessages += changed;
-            if (changed > 0 && folderId === "INBOX") {
-              persistedForwardInboxEvents.push({
-                accountId: account.name,
-                mailboxId,
-                folderId,
-                externalId,
-              });
-            }
-          } else backfilledMessages += changed;
           if (hydrateBodies && bodyHydrationEnabledForFolder(watcher, folderPath, specialUse)) {
-            bodyHydrationCandidates.push({ mailboxId, folderId, externalId });
+            batchBodyHydrationCandidates.push({ mailboxId, folderId, externalId });
           }
           durableUid = uid;
         }
@@ -526,6 +522,26 @@ const syncFolder = async (
         // Range was empty -- advance the checkpoint anyway; we now know
         // there is nothing to fetch in that range.
         durableUid = mode === "forward" ? batchTo : batchFrom;
+      } else {
+        const upsert = await deps.drive.upsertMessages(
+          mailboxId,
+          folderId,
+          batchPayloads,
+          batchExternalIds,
+        );
+        if (upsert.tag === "Err") {
+          return await finishWithError(upsert.error);
+        }
+
+        const changed = upsert.value.inserted + upsert.value.updated;
+        newMessages += changed;
+        if (mode === "forward") {
+          forwardMessages += changed;
+          if (changed > 0) {
+            persistedForwardInboxEvents.push(...batchForwardInboxEvents);
+          }
+        } else backfilledMessages += changed;
+        bodyHydrationCandidates.push(...batchBodyHydrationCandidates);
       }
 
       const checkpoint: SyncState =
