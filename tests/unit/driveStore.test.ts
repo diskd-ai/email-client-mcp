@@ -164,6 +164,69 @@ describe("store/buildDriveStore ensureMailbox", () => {
   });
 });
 
+describe("store/buildDriveStore patchMessages", () => {
+  beforeEach(() => {
+    process.env.APIS_BASE_URL = "https://app.example.test";
+    process.env.APIS_API_KEY = "api-key";
+    process.env.APIS_WORKSPACE_ID = "workspace-1";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("calls messages_store/patch-batch through raw Drive JSON-RPC", async () => {
+    const calls: Array<{ url: string | URL | Request; init?: RequestInit }> = [];
+    stubFetch(
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url, init });
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { patched: 2, missing_external_ids: ["14:99"] },
+          }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    );
+    const drive = buildDriveStore({} as never);
+
+    const result = await drive.patchMessages("mail-w1", "INBOX", [
+      {
+        externalId: "14:94",
+        payloadPatch: { flags: ["\\Seen"], labels: ["Important"], fetchedAt: "now" },
+      },
+    ]);
+
+    expect(result).toEqual({
+      tag: "Ok",
+      value: { patched: 2, missingExternalIds: ["14:99"] },
+    });
+    expect(calls[0]?.url).toBe("https://app.example.test/v1/os/drive/api/v1");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
+      jsonrpc: "2.0",
+      method: "messages_store/patch-batch",
+      params: {
+        mailbox_id: "mail-w1",
+        folder_id: "INBOX",
+        auto_commit: false,
+        items: [
+          {
+            external_id: "14:94",
+            payload_patch: {
+              flags: ["\\Seen"],
+              labels: ["Important"],
+              fetchedAt: "now",
+            },
+          },
+        ],
+      },
+    });
+  });
+});
+
+
 describe("store/buildDriveStore attachment upload", () => {
   beforeEach(() => {
     process.env.APIS_BASE_URL = "https://app.example.test";

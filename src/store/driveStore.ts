@@ -26,6 +26,11 @@ type CreateMailboxJsonRpcResult = {
   readonly drive_path?: string;
 };
 
+type PatchBatchJsonRpcResult = {
+  readonly patched?: number;
+  readonly missing_external_ids?: readonly unknown[];
+};
+
 type IdempotentUploadStartResult = {
   readonly alreadyUploaded?: boolean;
   readonly intentId?: string | null;
@@ -43,6 +48,11 @@ export type UploadAttachmentResult = {
   readonly attachmentId: string;
   readonly storedSizeBytes: number;
   readonly storedAt: string;
+};
+
+export type MessagePayloadPatchInput = {
+  readonly externalId: string;
+  readonly payloadPatch: Readonly<Record<string, unknown>>;
 };
 
 export type DriveStore = {
@@ -80,6 +90,11 @@ export type DriveStore = {
     folderId: string,
     externalId: string,
   ) => Promise<Result<DriveError, StoredEmailPayload | null>>;
+  readonly patchMessages: (
+    mailboxId: string,
+    folderId: string,
+    patches: readonly MessagePayloadPatchInput[],
+  ) => Promise<Result<DriveError, { patched: number; missingExternalIds: readonly string[] }>>;
   readonly uploadAttachment: (
     mailboxId: string,
     folderId: string,
@@ -134,30 +149,21 @@ const jsonRpcAuthHeaders = (): Record<string, string> => ({
   ...uploadAuthHeaders(),
 });
 
-const createSegmentedMailbox = async (
-  mailboxId: string,
-  displayName: string,
-): Promise<CreateMailboxJsonRpcResult> => {
+const callDriveJsonRpc = async <T>(
+  method: string,
+  params: Readonly<Record<string, unknown>>,
+): Promise<T> => {
   const response = await fetch(resolveDriveRpcUrl(), {
     method: "POST",
     headers: jsonRpcAuthHeaders(),
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "messages_store/create_mailbox",
-      params: {
-        mailbox_id: mailboxId,
-        display_name: displayName,
-        storage_version: "segments-v1",
-      },
-    }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${await response.text()}`);
   }
   const payload = (await response.json()) as {
     readonly error?: { readonly message?: string; readonly data?: unknown };
-    readonly result?: CreateMailboxJsonRpcResult;
+    readonly result?: T;
   };
   if (payload.error !== undefined) {
     throw new Error(payload.error.message ?? JSON.stringify(payload.error));
@@ -166,6 +172,38 @@ const createSegmentedMailbox = async (
     throw new Error("missing JSON-RPC result");
   }
   return payload.result;
+};
+
+const createSegmentedMailbox = async (
+  mailboxId: string,
+  displayName: string,
+): Promise<CreateMailboxJsonRpcResult> =>
+  callDriveJsonRpc<CreateMailboxJsonRpcResult>("messages_store/create_mailbox", {
+    mailbox_id: mailboxId,
+    display_name: displayName,
+    storage_version: "segments-v1",
+  });
+
+const patchMessagePayloads = async (
+  mailboxId: string,
+  folderId: string,
+  patches: readonly MessagePayloadPatchInput[],
+): Promise<{ patched: number; missingExternalIds: readonly string[] }> => {
+  const result = await callDriveJsonRpc<PatchBatchJsonRpcResult>("messages_store/patch-batch", {
+    mailbox_id: mailboxId,
+    folder_id: folderId,
+    items: patches.map((patch) => ({
+      external_id: patch.externalId,
+      payload_patch: patch.payloadPatch,
+    })),
+    auto_commit: false,
+  });
+  return {
+    patched: result.patched ?? 0,
+    missingExternalIds: (result.missing_external_ids ?? []).filter(
+      (value): value is string => typeof value === "string",
+    ),
+  };
 };
 
 const uploadAuthHeaders = (): Record<string, string> => {
@@ -309,6 +347,14 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
       }
       return Err(driveError(`folder.getMessage failed: ${msg}`, cause));
     }
+  },
+  async patchMessages(mailboxId, folderId, patches) {
+    if (patches.length === 0) return Ok({ patched: 0, missingExternalIds: [] });
+    const r = await wrap("messages_store.patch-batch", () =>
+      patchMessagePayloads(mailboxId, folderId, patches),
+    );
+    if (r.tag === "Err") return r;
+    return Ok(r.value);
   },
   async uploadAttachment(mailboxId, folderId, externalId, attachment, content) {
     const attachments = attachmentScoped(store, mailboxId, folderId, externalId);

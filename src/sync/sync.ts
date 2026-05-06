@@ -63,6 +63,14 @@ export type SyncDeps = {
       folderId: string,
       externalId: string,
     ) => Promise<Result<AppError, StoredEmailPayload | null>>;
+    readonly patchMessages: (
+      mailboxId: string,
+      folderId: string,
+      patches: readonly {
+        readonly externalId: string;
+        readonly payloadPatch: Readonly<Record<string, unknown>>;
+      }[],
+    ) => Promise<Result<AppError, { patched: number; missingExternalIds: readonly string[] }>>;
     readonly uploadAttachment: (
       mailboxId: string,
       folderId: string,
@@ -221,18 +229,13 @@ const descendingRange = (lo: number, hi: number): readonly [number, number][] =>
   return out;
 };
 
-const mergeReconciledFlags = (
-  existing: StoredEmailPayload | null,
+const reconciledFlagPatch = (
   incoming: StoredEmailPayload,
-): StoredEmailPayload => {
-  if (existing === null) return incoming;
-  return {
-    ...existing,
-    flags: incoming.flags,
-    labels: incoming.labels,
-    fetchedAt: incoming.fetchedAt,
-  };
-};
+): Readonly<Record<string, unknown>> => ({
+  flags: incoming.flags,
+  labels: incoming.labels,
+  fetchedAt: incoming.fetchedAt,
+});
 
 const isAllMailFolder = (folderPath: string, specialUse: string | null): boolean =>
   specialUse === "\\All" || /(?:^|\/)All Mail$/i.test(folderPath);
@@ -655,8 +658,11 @@ const syncFolder = async (
     const reconTo = state.forwardSyncedUid;
     const reconFrom = Math.max(1, reconTo - flagWindow + 1);
     try {
-      const updated: StoredEmailPayload[] = [];
-      const updatedIds: string[] = [];
+      const patches: Array<{
+        readonly externalId: string;
+        readonly payloadPatch: Readonly<Record<string, unknown>>;
+      }> = [];
+      const fallbackPayloads = new Map<string, StoredEmailPayload>();
       for await (const env of deps.imap.fetchEnvelopesRange(
         account.name,
         folderPath,
@@ -673,25 +679,12 @@ const syncFolder = async (
           truncated: false,
         });
         const externalId = externalIdFor(status.uidValidity, env.uid);
-        const existingPayload = await deps.drive.getMessage(mailboxId, folderId, externalId);
-        if (existingPayload.tag === "Err") {
-          return {
-            folderId,
-            newMessages,
-            reconciledFlags: 0,
-            hydratedBodies,
-            bodyHydrationErrors,
-            uidValidityRolled,
-            error: errorMessage(existingPayload.error),
-          };
-        }
-        updated.push(mergeReconciledFlags(existingPayload.value, incoming));
-        updatedIds.push(externalId);
+        patches.push({ externalId, payloadPatch: reconciledFlagPatch(incoming) });
+        fallbackPayloads.set(externalId, incoming);
       }
-      if (updated.length > 0) {
-        const ups = await deps.drive.upsertMessages(mailboxId, folderId, updated, updatedIds);
-        if (ups.tag === "Err") {
-          // Reconciliation is best-effort; record but don't advance error state.
+      if (patches.length > 0) {
+        const patched = await deps.drive.patchMessages(mailboxId, folderId, patches);
+        if (patched.tag === "Err") {
           return {
             folderId,
             newMessages,
@@ -699,10 +692,41 @@ const syncFolder = async (
             hydratedBodies,
             bodyHydrationErrors,
             uidValidityRolled,
-            error: errorMessage(ups.error),
+            error: errorMessage(patched.error),
           };
         }
-        reconciledFlags = updated.length;
+        let fallbackChanged = 0;
+        if (patched.value.missingExternalIds.length > 0) {
+          const missingPayloads: StoredEmailPayload[] = [];
+          const missingIds: string[] = [];
+          for (const externalId of patched.value.missingExternalIds) {
+            const payload = fallbackPayloads.get(externalId);
+            if (payload === undefined) continue;
+            missingPayloads.push(payload);
+            missingIds.push(externalId);
+          }
+          if (missingPayloads.length > 0) {
+            const ups = await deps.drive.upsertMessages(
+              mailboxId,
+              folderId,
+              missingPayloads,
+              missingIds,
+            );
+            if (ups.tag === "Err") {
+              return {
+                folderId,
+                newMessages,
+                reconciledFlags: 0,
+                hydratedBodies,
+                bodyHydrationErrors,
+                uidValidityRolled,
+                error: errorMessage(ups.error),
+              };
+            }
+            fallbackChanged = ups.value.inserted + ups.value.updated;
+          }
+        }
+        reconciledFlags = patched.value.patched + fallbackChanged;
       }
     } catch (cause) {
       // Best-effort step; keep main result.

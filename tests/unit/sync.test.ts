@@ -83,6 +83,8 @@ const buildFakeDeps = (
     readonly fetchEnvelopeRangeCalls?: string[];
     readonly fetchBodyCalls?: string[];
     readonly fetchBodyErrors?: ReadonlyMap<number, ImapError>;
+    readonly getMessageCalls?: string[];
+    readonly patchMessagesCalls?: string[];
     readonly notifyCalls?: string[];
     readonly notifyError?: Error;
     readonly syncLogs?: string[];
@@ -169,11 +171,34 @@ const buildFakeDeps = (
         return Ok({ inserted, updated });
       },
       getMessage: async (mailboxId, folderId, externalId) => {
+        options?.getMessageCalls?.push(`${mailboxId}:${folderId}:${externalId}`);
         const m = drive.folders.get(mailboxId);
         if (m === undefined) return Ok(null);
         const f = m.get(folderId);
         if (f === undefined) return Ok(null);
         return Ok(f.payloads.get(externalId) ?? null);
+      },
+      patchMessages: async (mailboxId, folderId, patches) => {
+        options?.patchMessagesCalls?.push(`${mailboxId}:${folderId}:${patches.length}`);
+        const m = drive.folders.get(mailboxId);
+        if (m === undefined) return Err({ kind: "DriveError", message: "no mailbox" } as AppError);
+        const f = m.get(folderId);
+        if (f === undefined) return Err({ kind: "DriveError", message: "no folder" } as AppError);
+        const missingExternalIds: string[] = [];
+        let patched = 0;
+        for (const patch of patches) {
+          const existing = f.payloads.get(patch.externalId);
+          if (existing === undefined) {
+            missingExternalIds.push(patch.externalId);
+            continue;
+          }
+          f.payloads.set(patch.externalId, {
+            ...existing,
+            ...(patch.payloadPatch as Partial<StoredEmailPayload>),
+          });
+          patched += 1;
+        }
+        return Ok({ patched, missingExternalIds });
       },
       uploadAttachment: async (mailboxId, folderId, externalId, attachment, content) => {
         const mailbox = drive.folders.get(mailboxId);
@@ -942,18 +967,72 @@ describe("sync/runSyncOnce", () => {
     };
     await runSyncOnce(buildFakeDeps(imap, drive), acct, watcherDefault);
 
-    const rep = await runSyncOnce(buildFakeDeps(imap, drive), acct, {
-      ...watcherDefault,
-      flag_reconcile_window: 100,
-    });
+    const getMessageCalls: string[] = [];
+    const patchMessagesCalls: string[] = [];
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { getMessageCalls, patchMessagesCalls }),
+      acct,
+      {
+        ...watcherDefault,
+        flag_reconcile_window: 100,
+      },
+    );
 
     expect(rep.error).toBeNull();
     expect(rep.folders[0]?.reconciledFlags).toBe(1);
+    expect(getMessageCalls).toEqual([]);
+    expect(patchMessagesCalls).toEqual(["exchange-work:INBOX:1"]);
     const stored = drive.folders.get("exchange-work")?.get("INBOX")?.payloads.get("14:94");
     expect(stored?.bodyState).toBe("not_loaded");
     expect(stored?.bodyText).toBeNull();
     expect(stored?.bodyHtml).toBeNull();
     expect(stored?.snippet).toBe("");
+  });
+
+  it("falls back to metadata upsert when flag reconciliation patch misses a row", async () => {
+    const drive: FakeDriveState = {
+      mailboxes: new Map([["exchange-work", { displayName: "Work" }]]),
+      folders: new Map([
+        [
+          "exchange-work",
+          new Map([
+            [
+              "INBOX",
+              {
+                metadata: {
+                  uidValidity: 14,
+                  uidNext: 95,
+                  forwardSyncedUid: 94,
+                  backfillBeforeUid: null,
+                  lastSyncedUid: 94,
+                  lastSyncStartedAt: null,
+                  lastSyncFinishedAt: null,
+                  lastSyncError: null,
+                },
+                messageIds: new Set(),
+                payloads: new Map(),
+              },
+            ],
+          ]),
+        ],
+      ]),
+    };
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 14, uidNext: 95, msgs: [mkMsg(94)] }]]),
+    };
+    const getMessageCalls: string[] = [];
+
+    const rep = await runSyncOnce(
+      buildFakeDeps(imap, drive, { getMessageCalls }),
+      acct,
+      { ...watcherDefault, flag_reconcile_window: 100 },
+    );
+
+    expect(rep.error).toBeNull();
+    expect(rep.folders[0]?.reconciledFlags).toBe(1);
+    expect(getMessageCalls).toEqual([]);
+    expect(drive.folders.get("exchange-work")?.get("INBOX")?.payloads.has("14:94")).toBe(true);
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- folders deleted on IMAP are pruned from drive */
