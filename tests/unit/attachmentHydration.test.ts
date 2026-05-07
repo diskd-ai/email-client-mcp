@@ -56,7 +56,9 @@ const buildDeps = (
   stored: Map<string, StoredEmailPayload>,
   options?: {
     readonly downloadThrows?: unknown;
+    readonly downloadNever?: boolean;
     readonly uploadError?: AppError;
+    readonly uploadNever?: boolean;
     readonly downloadCalls?: string[];
     readonly uploadCalls?: string[];
     readonly disposeCalls?: string[];
@@ -75,6 +77,9 @@ const buildDeps = (
     uploadAttachment: async (_mailboxId, _folderId, _externalId, attachment, content) => {
       options?.uploadCalls?.push(`${attachment.attachmentId}:${attachment.partId}`);
       if (options?.uploadError !== undefined) return Err(options.uploadError);
+      if (options?.uploadNever === true) {
+        return await new Promise<Result<AppError, UploadAttachmentResult>>(() => undefined);
+      }
       const chunks: string[] = [];
       for await (const chunk of content) chunks.push(Buffer.from(chunk).toString("utf8"));
       expect(chunks).toEqual(["hello", "-attachment"]);
@@ -89,6 +94,11 @@ const buildDeps = (
     downloadPart: async (accountId, mailbox, uid, partId) => {
       options?.downloadCalls?.push(`${accountId}:${mailbox}:${uid}:${partId}`);
       if (options?.downloadThrows !== undefined) throw options.downloadThrows;
+      if (options?.downloadNever === true) {
+        return await new Promise<
+          Awaited<ReturnType<AttachmentHydrationDeps["imap"]["downloadPart"]>>
+        >(() => undefined);
+      }
       return {
         content: (async function* (): AsyncIterable<Uint8Array> {
           yield Buffer.from("hello");
@@ -191,6 +201,48 @@ describe("sync/attachmentHydration", () => {
     expect(patched?.attachments[0]).toMatchObject({
       storageState: "failed_retryable",
       lastLoadError: expect.stringContaining("THROTTLED"),
+    });
+  });
+
+  it("marks attachment download timeouts as retryable", async () => {
+    const stored = new Map<string, StoredEmailPayload>([["14:42", basePayload]]);
+
+    const result = await hydrateStoredMessageAttachment(
+      buildDeps(stored, { downloadNever: true }),
+      ref,
+      { timeoutMs: 1 },
+    );
+
+    expect(result.tag).toBe("Ok");
+    if (result.tag === "Ok") {
+      expect(result.value.status).toBe("failed_retryable");
+      expect(result.value.error).toContain("timed out");
+    }
+    expect(stored.get("14:42")?.attachments[0]).toMatchObject({
+      storageState: "failed_retryable",
+      lastLoadError: expect.stringContaining("timed out"),
+    });
+  });
+
+  it("marks attachment upload timeouts as retryable and disposes the download", async () => {
+    const stored = new Map<string, StoredEmailPayload>([["14:42", basePayload]]);
+    const disposeCalls: string[] = [];
+
+    const result = await hydrateStoredMessageAttachment(
+      buildDeps(stored, { uploadNever: true, disposeCalls }),
+      ref,
+      { timeoutMs: 1 },
+    );
+
+    expect(result.tag).toBe("Ok");
+    if (result.tag === "Ok") {
+      expect(result.value.status).toBe("failed_retryable");
+      expect(result.value.error).toContain("timed out");
+    }
+    expect(disposeCalls.length).toBeGreaterThanOrEqual(1);
+    expect(stored.get("14:42")?.attachments[0]).toMatchObject({
+      storageState: "failed_retryable",
+      lastLoadError: expect.stringContaining("timed out"),
     });
   });
 

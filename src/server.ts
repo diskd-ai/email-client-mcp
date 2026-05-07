@@ -32,7 +32,10 @@ import {
 import { buildImapPool } from "./imap/pool.js";
 import { buildDiskd } from "./sdk/diskdClient.js";
 import { buildDriveStore } from "./store/driveStore.js";
-import type { AttachmentHydrationDeps } from "./sync/attachmentHydration.js";
+import {
+  type AttachmentHydrationDeps,
+  DEFAULT_ATTACHMENT_HYDRATION_TIMEOUT_MS,
+} from "./sync/attachmentHydration.js";
 import type { BodyHydrationDeps } from "./sync/bodyHydration.js";
 import type { SyncDeps } from "./sync/sync.js";
 import { buildWatcher } from "./sync/watcher.js";
@@ -189,7 +192,9 @@ const main = async (): Promise<void> => {
       downloadPart: async (accountId, path, uid, partId) => {
         const c = await pool.forAccount(accountId);
         if (c.tag === "Err") throw new Error(errorMessage(c.error));
-        return await downloadPartByUid(c.value, path, uid, partId);
+        return await downloadPartByUid(c.value, path, uid, partId, {
+          timeoutMs: DEFAULT_ATTACHMENT_HYDRATION_TIMEOUT_MS,
+        });
       },
     },
     now: () => new Date(),

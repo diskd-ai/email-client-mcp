@@ -400,6 +400,49 @@ export type DownloadedPart = {
   readonly dispose: () => void;
 };
 
+export type DownloadPartOptions = {
+  readonly timeoutMs?: number;
+  readonly onTimeout?: () => void;
+};
+
+class DownloadPartTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`IMAP attachment download timed out after ${timeoutMs}ms`);
+    this.name = "DownloadPartTimeoutError";
+  }
+}
+
+const abortImapOperation = (client: ImapFlow, options: DownloadPartOptions): void => {
+  options.onTimeout?.();
+  try {
+    (client as unknown as { readonly close?: () => unknown }).close?.();
+  } catch {
+    // Best-effort abort: imapflow close may throw if the socket is already gone.
+  }
+};
+
+const withDownloadTimeout = async <T>(
+  client: ImapFlow,
+  operation: Promise<T>,
+  options: DownloadPartOptions,
+): Promise<T> => {
+  const timeoutMs = options.timeoutMs;
+  if (timeoutMs === undefined || timeoutMs <= 0) return await operation;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  operation.catch(() => undefined);
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      abortImapOperation(client, options);
+      reject(new DownloadPartTimeoutError(timeoutMs));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+};
+
 const openDownloadedPartByUid = async (
   client: ImapFlow,
   mailbox: string,
@@ -474,22 +517,34 @@ export const downloadPartByUid = async (
   mailbox: string,
   uid: number,
   partId: string,
+  options: DownloadPartOptions = {},
 ): Promise<DownloadedPart> => {
   // Drive proxy requires an exact Content-Length. imapflow's
   // meta.expectedSize is the IMAP fetch response size for encoded parts,
   // not necessarily the decoded stream byte length. Count one streaming pass,
   // then reopen the same part for the actual upload stream.
-  const probe = await openDownloadedPartByUid(client, mailbox, uid, partId);
-  let sizeBytes = 0;
-  try {
-    for await (const chunk of probe.content) {
-      sizeBytes += chunk.byteLength;
-    }
-  } finally {
-    probe.dispose();
-  }
+  const sizeBytes = await withDownloadTimeout(
+    client,
+    (async () => {
+      const probe = await openDownloadedPartByUid(client, mailbox, uid, partId);
+      let probedSizeBytes = 0;
+      try {
+        for await (const chunk of probe.content) {
+          probedSizeBytes += chunk.byteLength;
+        }
+      } finally {
+        probe.dispose();
+      }
+      return probedSizeBytes;
+    })(),
+    options,
+  );
 
-  const upload = await openDownloadedPartByUid(client, mailbox, uid, partId);
+  const upload = await withDownloadTimeout(
+    client,
+    openDownloadedPartByUid(client, mailbox, uid, partId),
+    options,
+  );
   return { ...upload, sizeBytes };
 };
 

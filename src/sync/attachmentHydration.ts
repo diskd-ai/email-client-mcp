@@ -134,7 +134,39 @@ const persist = async (
   return Ok(payload);
 };
 
+export const DEFAULT_ATTACHMENT_HYDRATION_TIMEOUT_MS = 25_000;
+
 const isRetryableAppFailure = (cause: unknown): boolean => isRetryableImapError(cause);
+
+class AttachmentHydrationTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`attachment hydration timed out after ${timeoutMs}ms`);
+    this.name = "AttachmentHydrationTimeoutError";
+  }
+}
+
+const withAttachmentTimeout = async <T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout?: () => void,
+): Promise<T> => {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  promise.catch(() => undefined);
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      onTimeout?.();
+      reject(new AttachmentHydrationTimeoutError(timeoutMs));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    if (timedOut) promise.catch(() => undefined);
+  }
+};
 
 const outcome = (
   ref: AttachmentHydrationRef,
@@ -156,8 +188,9 @@ const outcome = (
 export const hydrateStoredMessageAttachment = async (
   deps: AttachmentHydrationDeps,
   ref: AttachmentHydrationRef,
-  options?: { readonly refresh?: boolean },
+  options?: { readonly refresh?: boolean; readonly timeoutMs?: number },
 ): Promise<Result<AppError, AttachmentHydrationOutcome>> => {
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_ATTACHMENT_HYDRATION_TIMEOUT_MS;
   const existing = await deps.drive.getMessage(ref.mailboxId, ref.folderId, ref.externalId);
   if (existing.tag === "Err") return existing;
   if (existing.value === null) return Err(notFound(`message ${ref.externalId}`));
@@ -186,11 +219,14 @@ export const hydrateStoredMessageAttachment = async (
 
   let downloaded: Awaited<ReturnType<AttachmentHydrationDeps["imap"]["downloadPart"]>>;
   try {
-    downloaded = await deps.imap.downloadPart(
-      payload.accountId,
-      payload.mailbox,
-      payload.uid,
-      attachmentWithId.partId,
+    downloaded = await withAttachmentTimeout(
+      deps.imap.downloadPart(
+        payload.accountId,
+        payload.mailbox,
+        payload.uid,
+        attachmentWithId.partId,
+      ),
+      timeoutMs,
     );
   } catch (cause) {
     const message = (cause as Error)?.message ?? String(cause);
@@ -206,19 +242,33 @@ export const hydrateStoredMessageAttachment = async (
     sizeBytes: downloaded.sizeBytes ?? attachmentWithId.sizeBytes,
     contentType: downloaded.contentType ?? attachmentWithId.contentType,
   };
-  const uploaded = await (async () => {
-    try {
-      return await deps.drive.uploadAttachment(
-        ref.mailboxId,
-        ref.folderId,
-        ref.externalId,
-        uploadAttachment,
-        downloaded.content,
-      );
-    } finally {
-      downloaded.dispose();
-    }
-  })();
+  let uploaded: Result<AppError, UploadAttachmentResult>;
+  try {
+    uploaded = await (async () => {
+      try {
+        return await withAttachmentTimeout(
+          deps.drive.uploadAttachment(
+            ref.mailboxId,
+            ref.folderId,
+            ref.externalId,
+            uploadAttachment,
+            downloaded.content,
+          ),
+          timeoutMs,
+          () => downloaded.dispose(),
+        );
+      } finally {
+        downloaded.dispose();
+      }
+    })();
+  } catch (cause) {
+    const message = (cause as Error)?.message ?? String(cause);
+    const status = isRetryableAppFailure(cause) ? "failed_retryable" : "failed_permanent";
+    const patched = patchFailed(payload, ref.attachmentId, status, message);
+    const persisted = await persist(deps, ref, patched.payload);
+    if (persisted.tag === "Err") return persisted;
+    return Ok(outcome(ref, persisted.value, status, patched.attachment, message));
+  }
   if (uploaded.tag === "Err") {
     const message = errorMessage(uploaded.error);
     const status = isRetryableAppFailure(message) ? "failed_retryable" : "failed_permanent";

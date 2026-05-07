@@ -177,6 +177,34 @@ describe("imap/fetch attachment download", () => {
     );
     expect(released).toBe(1);
   });
+
+  it("closes the IMAP client when attachment download times out", async () => {
+    let released = 0;
+    let closed = 0;
+    let rejectDownload: ((cause: Error) => void) | null = null;
+    const client = {
+      getMailboxLock: async () => ({
+        release: () => {
+          released += 1;
+        },
+      }),
+      close: () => {
+        closed += 1;
+        rejectDownload?.(new Error("client closed"));
+      },
+      download: async () =>
+        await new Promise((_resolve, reject) => {
+          rejectDownload = reject;
+        }),
+    };
+
+    await expect(
+      downloadPartByUid(client as never, "INBOX", 42, "2", { timeoutMs: 1 }),
+    ).rejects.toThrow(/timed out/);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closed).toBe(1);
+    expect(released).toBe(1);
+  });
 });
 
 describe("imap/fetch body part discovery", () => {
