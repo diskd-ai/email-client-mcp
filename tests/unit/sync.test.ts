@@ -364,37 +364,61 @@ describe("sync/runSyncOnce", () => {
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(3);
   });
 
-  it("notifies app-service after forward INBOX messages are stored and checkpointed", async () => {
+  it("notifies app-service only after post-bootstrap forward INBOX messages are stored and checkpointed", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const notifyCalls: string[] = [];
     const syncLogs: string[] = [];
-    const imap: FakeImapState = {
+    const imap1: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
       messagesByFolder: new Map([
         ["INBOX", { uidValidity: 100, uidNext: 3, msgs: [mkMsg(1), mkMsg(2)] }],
       ]),
     };
 
+    const bootstrap = await runSyncOnce(
+      buildFakeDeps(imap1, drive, { notifyCalls, syncLogs }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(bootstrap.error).toBeNull();
+    expect(notifyCalls).toEqual([]);
+    expect(syncLogs).toEqual([]);
+
+    const imap2: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([
+        [
+          "INBOX",
+          {
+            uidValidity: 100,
+            uidNext: 5,
+            msgs: [mkMsg(1), mkMsg(2), mkMsg(3), mkMsg(4)],
+          },
+        ],
+      ]),
+    };
+
     const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, { notifyCalls, syncLogs }),
+      buildFakeDeps(imap2, drive, { notifyCalls, syncLogs }),
       acct,
       watcherDefault,
     );
 
     expect(rep.error).toBeNull();
     expect(notifyCalls).toEqual([
-      "work:exchange-work:INBOX:100:1",
-      "work:exchange-work:INBOX:100:2",
+      "work:exchange-work:INBOX:100:3",
+      "work:exchange-work:INBOX:100:4",
     ]);
     expect(syncLogs).toEqual([
-      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:1"}',
-      'signal.notify-ok:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:1"}',
-      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:2"}',
-      'signal.notify-ok:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:2"}',
+      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:3"}',
+      'signal.notify-ok:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:3"}',
+      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:4"}',
+      'signal.notify-ok:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:4"}',
     ]);
     const state = drive.folders.get("exchange-work")?.get("INBOX")
       ?.metadata as unknown as SyncState;
-    expect(state.forwardSyncedUid).toBe(2);
+    expect(state.forwardSyncedUid).toBe(4);
   });
 
   it("does not notify when checkpoint write fails", async () => {
@@ -425,13 +449,21 @@ describe("sync/runSyncOnce", () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const notifyCalls: string[] = [];
     const syncLogs: string[] = [];
-    const imap: FakeImapState = {
+    const imap1: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
       messagesByFolder: new Map([["INBOX", { uidValidity: 100, uidNext: 2, msgs: [mkMsg(1)] }]]),
     };
+    await runSyncOnce(buildFakeDeps(imap1, drive), acct, watcherDefault);
+
+    const imap2: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 100, uidNext: 3, msgs: [mkMsg(1), mkMsg(2)] }],
+      ]),
+    };
 
     const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, {
+      buildFakeDeps(imap2, drive, {
         notifyCalls,
         notifyError: new Error("notify down"),
         syncLogs,
@@ -442,10 +474,10 @@ describe("sync/runSyncOnce", () => {
 
     expect(rep.error).toBeNull();
     expect(rep.folders[0]?.error).toBeNull();
-    expect(notifyCalls).toEqual(["work:exchange-work:INBOX:100:1"]);
+    expect(notifyCalls).toEqual(["work:exchange-work:INBOX:100:2"]);
     expect(syncLogs).toEqual([
-      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:1"}',
-      'signal.notify-err:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:1","error":"notify down"}',
+      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:2"}',
+      'signal.notify-err:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:2","error":"notify down"}',
     ]);
   });
 
@@ -469,7 +501,7 @@ describe("sync/runSyncOnce", () => {
     };
 
     await runSyncOnce(buildFakeDeps(imap, drive, { notifyCalls }), acct, watcher);
-    notifyCalls.length = 0;
+    expect(notifyCalls).toEqual([]);
     await runSyncOnce(buildFakeDeps(imap, drive, { notifyCalls }), acct, watcher);
 
     expect(notifyCalls).toEqual([]);

@@ -459,6 +459,7 @@ const syncFolder = async (
     rangesToProcess: readonly [number, number][],
     mode: "forward" | "backfill",
     hydrateBodies: boolean,
+    notifyForwardInbox: boolean,
   ): Promise<SyncFolderReport | null> => {
     for (const [batchFrom, batchTo] of rangesToProcess) {
       let sawMessageInBatch = false;
@@ -500,7 +501,7 @@ const syncFolder = async (
 
           batchPayloads.push(payload);
           batchExternalIds.push(externalId);
-          if (mode === "forward" && folderId === "INBOX") {
+          if (notifyForwardInbox && mode === "forward" && folderId === "INBOX") {
             batchForwardInboxEvents.push({
               accountId: account.name,
               mailboxId,
@@ -608,12 +609,14 @@ const syncFolder = async (
         range(recentFrom, latestUid),
         "forward",
         true,
+        false,
       );
       if (bootstrapError !== null) return bootstrapError;
     } else if (latestUid > state.forwardSyncedUid) {
       const forwardError = await processMetadataRanges(
         range(state.forwardSyncedUid + 1, latestUid),
         "forward",
+        true,
         true,
       );
       if (forwardError !== null) return forwardError;
@@ -636,6 +639,7 @@ const syncFolder = async (
       const backfillError = await processMetadataRanges(
         descendingRange(backfillFrom, backfillTo),
         "backfill",
+        false,
         false,
       );
       if (backfillError !== null) return backfillError;
