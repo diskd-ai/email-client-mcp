@@ -162,6 +162,34 @@ describe("store/buildDriveStore ensureMailbox", () => {
     expect(createMailbox).not.toHaveBeenCalled();
     expect(init).toHaveBeenCalledTimes(1);
   });
+
+  it("treats mailbox already exists from createMailbox as idempotent success", async () => {
+    const init = vi.fn(async () => ({ mailboxId: "mail-w1", schemaVersion: 2 }));
+    const store = {
+      listMailboxes: vi.fn(async () => []),
+      createMailbox: vi.fn(),
+      mailbox: vi.fn(() => ({ init })),
+    };
+    stubFetch(
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              error: { code: -32000, message: "mailbox already exists: mail-w1" },
+            }),
+            { status: 200 },
+          ),
+      ) as typeof fetch,
+    );
+
+    const drive = buildDriveStore(store as never);
+    const result = await drive.ensureMailbox("mail-w1", "w1@example.com");
+
+    expect(result.tag).toBe("Ok");
+    expect(init).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("store/buildDriveStore patchMessages", () => {

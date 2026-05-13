@@ -280,7 +280,7 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
       const create = await wrap("createMailbox", () =>
         createSegmentedMailbox(mailboxId, displayName),
       );
-      if (create.tag === "Err") return create;
+      if (create.tag === "Err" && !isConflict(create.error)) return create;
     }
     const init = await wrap("mailbox.init", () => store.mailbox({ mailboxId }).init());
     if (init.tag === "Err") return init;
