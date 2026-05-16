@@ -89,7 +89,7 @@ describe("store/buildDriveStore ensureMailbox", () => {
     globalThis.fetch = originalFetch;
   });
 
-  it("creates new mailboxes with segments-v1 storage and still runs init", async () => {
+  it("creates new mailboxes without a storage-version parameter and still runs init", async () => {
     const createMailbox = vi.fn(async () => ({ mailboxId: "mail-w1", dbInode: "", drivePath: "" }));
     const init = vi.fn(async () => ({ mailboxId: "mail-w1", schemaVersion: 2 }));
     const store = {
@@ -131,13 +131,12 @@ describe("store/buildDriveStore ensureMailbox", () => {
       params: {
         mailbox_id: "mail-w1",
         display_name: "w1@example.com",
-        storage_version: "segments-v1",
       },
     });
     expect(init).toHaveBeenCalledTimes(1);
   });
 
-  it("does not recreate existing mailboxes, preserving sqlite-v1 mailboxes", async () => {
+  it("does not recreate existing mailboxes, preserving current mailbox metadata", async () => {
     const createMailbox = vi.fn(async () => ({ mailboxId: "mail-w1", dbInode: "", drivePath: "" }));
     const init = vi.fn(async () => ({ mailboxId: "mail-w1", schemaVersion: 1 }));
     const store = {

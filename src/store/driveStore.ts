@@ -181,7 +181,6 @@ const createSegmentedMailbox = async (
   callDriveJsonRpc<CreateMailboxJsonRpcResult>("messages_store/create_mailbox", {
     mailbox_id: mailboxId,
     display_name: displayName,
-    storage_version: "segments-v1",
   });
 
 const patchMessagePayloads = async (
