@@ -40,6 +40,7 @@ import type { BodyHydrationDeps } from "./sync/bodyHydration.js";
 import type { SyncDeps } from "./sync/sync.js";
 import { buildWatcher } from "./sync/watcher.js";
 import { registerTools } from "./tools/registry.js";
+import { PACKAGE_VERSION } from "./version.js";
 
 const log = (msg: string, extra?: Readonly<Record<string, unknown>>): void => {
   const payload = extra === undefined ? msg : `${msg} ${JSON.stringify(extra)}`;
@@ -60,6 +61,8 @@ const main = async (): Promise<void> => {
     log("usage: email-client-mcp [stdio]");
     process.exit(2);
   }
+
+  log("starting", { version: PACKAGE_VERSION });
 
   const configPath = process.env.EMAIL_CLIENT_MCP_CONFIG;
   const cfg = await loadConfig(configPath);
@@ -216,7 +219,7 @@ const main = async (): Promise<void> => {
 
   const server = new McpServer({
     name: "email-client-mcp",
-    version: "0.1.0",
+    version: PACKAGE_VERSION,
   });
 
   registerTools(server, {
