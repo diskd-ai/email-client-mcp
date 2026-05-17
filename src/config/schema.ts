@@ -10,6 +10,8 @@
 
 import { z } from "zod";
 
+const DEFAULT_WATCHER_INTERVAL_MS = 300_000;
+
 const imapSchema = z.object({
   host: z.string().min(1),
   port: z.number().int().min(1).max(65535),
@@ -63,7 +65,7 @@ const recentFirstSchema = z.object({
 
 const watcherSchema = z.object({
   enabled: z.boolean().default(true),
-  interval_ms: z.number().int().min(60_000).default(60_000),
+  interval_ms: z.number().int().min(60_000).default(DEFAULT_WATCHER_INTERVAL_MS),
   folders: z.array(z.string()).optional(),
   flag_reconcile_window: z.number().int().min(0).default(500),
   body_hydration: bodyHydrationSchema.default({
@@ -95,7 +97,7 @@ export const configSchema = z.object({
   sdk: sdkSchema.optional(),
   watcher: watcherSchema.default({
     enabled: true,
-    interval_ms: 60_000,
+    interval_ms: DEFAULT_WATCHER_INTERVAL_MS,
     flag_reconcile_window: 500,
     body_hydration: {
       enabled: true,
