@@ -1095,6 +1095,37 @@ describe("sync/runSyncOnce", () => {
     expect(rep.prunedFolders).toBe(1);
     expect(drive.folders.get("exchange-work")?.has("Archive")).toBe(false);
   });
+
+  /* REQUIREMENT end:comm/email-client-mcp/sync-review-retention -- Review messages disappear only after explicit delete or send */
+  it("preserves the platform-managed Review folder when absent from IMAP", async () => {
+    const drive: FakeDriveState = {
+      mailboxes: new Map([["exchange-work", { displayName: "Work" }]]),
+      folders: new Map([
+        [
+          "exchange-work",
+          new Map([
+            [
+              "Review",
+              {
+                metadata: {},
+                messageIds: new Set(["review-1"]),
+                payloads: new Map(),
+              },
+            ],
+          ]),
+        ],
+      ]),
+    };
+    const imap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: null }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 1, uidNext: 2, msgs: [mkMsg(1)] }]]),
+    };
+
+    const rep = await runSyncOnce(buildFakeDeps(imap, drive), acct, watcherDefault);
+
+    expect(rep.prunedFolders).toBe(0);
+    expect(drive.folders.get("exchange-work")?.has("Review")).toBe(true);
+  });
 });
 
 describe("sync watcher invariants surfaced via runSyncOnce", () => {

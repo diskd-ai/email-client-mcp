@@ -10,7 +10,8 @@
  *  2. UIDVALIDITY mismatch -> drop+recreate folder, resync from UID 1.
  *  3. Folder metadata is the source of truth across restarts. The
  *     watcher never relies on in-memory state to resume.
- *  4. Folders deleted in IMAP are pruned from Drive at the end of a tick.
+ *  4. Folders deleted in IMAP are pruned from Drive at the end of a tick,
+ *     except platform-managed folders whose lifecycle is owned by actions.
  *  5. A bounded sliding-window flag reconciliation catches drift on
  *     already-synced UIDs without re-downloading bodies.
  *
@@ -28,6 +29,7 @@ import type { StoredAttachment, StoredEmailPayload, SyncState } from "../store/p
 import { type BodyHydrationRef, hydrateStoredMessageBodies } from "./bodyHydration.js";
 
 const BATCH_SIZE = 50;
+const PLATFORM_MANAGED_FOLDER_IDS = new Set<string>(["Review"]);
 
 export type SyncDeps = {
   readonly drive: {
@@ -275,6 +277,16 @@ const sortFoldersByPriority = <
       return a.index - b.index;
     })
     .map(({ folder }) => folder);
+
+/**
+ * Keeps platform-owned folders from being reconciled against IMAP folder state.
+ * Review drafts are removed only by explicit Exchange send/delete actions.
+ */
+const shouldPruneDriveFolder = (
+  driveFolderId: string,
+  imapFolderPaths: ReadonlySet<string>,
+): boolean =>
+  !imapFolderPaths.has(driveFolderId) && !PLATFORM_MANAGED_FOLDER_IDS.has(driveFolderId);
 
 /**
  * Sync one folder. Returns the per-folder report; never throws.
@@ -844,7 +856,7 @@ export const runSyncOnce = async (
   if (driveFoldersR.tag === "Ok") {
     const imapPaths = new Set(filteredFolders.map((f) => f.path));
     for (const df of driveFoldersR.value) {
-      if (!imapPaths.has(df.folderId)) {
+      if (shouldPruneDriveFolder(df.folderId, imapPaths)) {
         const del = await deps.drive.deleteFolder(mailboxId, df.folderId);
         if (del.tag === "Ok") prunedFolders += 1;
       }
