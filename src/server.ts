@@ -228,6 +228,7 @@ const main = async (): Promise<void> => {
     watcher,
     bodyHydration: bodyHydrationDeps,
     attachmentHydration: attachmentHydrationDeps,
+    messageMirror: driveStore,
   });
 
   const transport = new StdioServerTransport();

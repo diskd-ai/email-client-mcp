@@ -127,6 +127,7 @@ describe("tools/system_hydrate_email_attachment", () => {
       watcher: {} as never,
       bodyHydration: {} as never,
       attachmentHydration: buildDeps(stored),
+      messageMirror: {} as never,
     });
 
     const tool = registered.find((item) => item.name === "system_hydrate_email_attachment");

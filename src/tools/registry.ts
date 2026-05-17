@@ -24,6 +24,11 @@ import { listEmails, listEmailsInput } from "./listEmails.js";
 import { listMailboxFolder, listMailboxFolderInput } from "./listMailboxFolder.js";
 import { moveEmail, moveEmailInput } from "./moveEmail.js";
 import {
+  type MessageMirrorPatchStore,
+  setEmailAttributes,
+  setEmailAttributesInput,
+} from "./setEmailAttributes.js";
+import {
   systemHydrateEmailAttachment,
   systemHydrateEmailAttachmentInput,
 } from "./systemHydrateEmailAttachment.js";
@@ -55,6 +60,7 @@ export type ToolDeps = {
   readonly watcher: Watcher;
   readonly bodyHydration: BodyHydrationDeps;
   readonly attachmentHydration: AttachmentHydrationDeps;
+  readonly messageMirror: MessageMirrorPatchStore;
 };
 
 export const registerTools = (server: McpServer, deps: ToolDeps): void => {
@@ -126,6 +132,16 @@ export const registerTools = (server: McpServer, deps: ToolDeps): void => {
       inputSchema: moveEmailInput.shape,
     },
     async (args) => fromResult(await moveEmail(deps.imapPool, args)),
+  );
+
+  server.registerTool(
+    "set_email_attributes",
+    {
+      description:
+        "Set read/unread and flagged/unflagged state for IMAP messages. Use when the user asks to mark mail as read, unread, starred, flagged, unstarred, or unflagged. Requires a real mailbox folder and UID values from list_emails/get_email. If the message was found in a virtual folder such as All Mail or Starred, call find_mailbox_folder first.",
+      inputSchema: setEmailAttributesInput.shape,
+    },
+    async (args) => fromResult(await setEmailAttributes(deps.imapPool, deps.messageMirror, args)),
   );
 
   server.registerTool(

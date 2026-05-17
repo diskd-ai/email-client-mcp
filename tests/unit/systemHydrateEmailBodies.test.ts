@@ -169,6 +169,8 @@ describe("tools/system_hydrate_email_bodies", () => {
       imapPool: {} as never,
       watcher: {} as never,
       bodyHydration: buildDeps(stored),
+      attachmentHydration: {} as never,
+      messageMirror: {} as never,
     });
 
     const tool = registered.find((item) => item.name === "system_hydrate_email_bodies");

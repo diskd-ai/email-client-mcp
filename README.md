@@ -23,6 +23,7 @@ All read tools fetch from IMAP live (BODY.PEEK, never silently flips `\Seen`):
 - `get_email` -- single message by UID. Formats: `raw`, `text` (HTML stripped), `stripped` (also drops quoted replies + signatures). `markRead=true` opt-in.
 - `get_emails` -- bulk variant of `get_email` (max 20).
 - `move_email` -- IMAP MOVE between folders. Refuses virtual mailboxes (e.g. `[Gmail]/All Mail`).
+- `set_email_attributes` -- set read/unread and flagged/unflagged state for IMAP messages, then patch the Drive mirror.
 - `bulk_action` -- `mark_read | mark_unread | flag | unflag | move | delete` over up to 100 UIDs.
 - `get_watcher_status` -- in-memory snapshot of the sync watcher.
 

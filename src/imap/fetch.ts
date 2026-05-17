@@ -282,6 +282,7 @@ const toInternalDate = (raw: Date | string | undefined): Date | undefined => {
 const toLike = (msg: FetchMessageObject): FetchedMessageLike => ({
   uid: msg.uid,
   flags: msg.flags ?? new Set<string>(),
+  labels: (msg as { readonly labels?: ReadonlySet<string> | readonly string[] }).labels,
   envelope: msg.envelope as FetchedMessageLike["envelope"],
   bodyStructure: msg.bodyStructure as FetchedMessageLike["bodyStructure"],
   internalDate: toInternalDate(msg.internalDate as Date | string | undefined),
@@ -312,6 +313,34 @@ export async function* fetchMetadataUidRange(
     yield toLike(msg);
   }
 }
+
+/**
+ * Fetch post-mutation metadata for explicit UIDs without body parts.
+ * Used after IMAP STORE so the Drive mirror receives authoritative flags.
+ */
+export const fetchMetadataByUids = async (
+  client: ImapFlow,
+  uids: readonly number[],
+): Promise<readonly FetchedMessageLike[]> => {
+  if (uids.length === 0) return [];
+  const sequence = uids.join(",");
+  const out: FetchedMessageLike[] = [];
+  for await (const msg of client.fetch(
+    sequence,
+    {
+      uid: true,
+      flags: true,
+      labels: true,
+      envelope: true,
+      bodyStructure: true,
+      internalDate: true,
+    } as never,
+    { uid: true },
+  )) {
+    out.push(toLike(msg));
+  }
+  return out;
+};
 
 /**
  * UID-range fetch for body hydration. Yields envelope + flags + bodyStructure

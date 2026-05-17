@@ -4,7 +4,7 @@
  *   1. Spawn dist/server.js stdio with the fixture config.
  *   2. Send `initialize` -> expect a server capabilities reply.
  *   3. Send `notifications/initialized`.
- *   4. Send `tools/list` -> expect 9 tool names matching the spec.
+ *   4. Send `tools/list` -> expect required tool names matching the spec.
  *   5. Call `list_accounts` -> expect one account named "smoke-account".
  *   6. Kill the server and exit 0 on success / non-zero on any failure.
  *
@@ -28,6 +28,7 @@ const expectedTools = [
   'get_email',
   'get_emails',
   'move_email',
+  'set_email_attributes',
   'bulk_action',
   'get_watcher_status',
 ];

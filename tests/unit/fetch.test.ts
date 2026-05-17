@@ -5,6 +5,7 @@ import {
   decodeMimeBodyPart,
   downloadPartByUid,
   fetchDisplayBodyByUid,
+  fetchMetadataByUids,
   fetchMetadataUidRange,
   findDisplayBodyPartIds,
 } from "../../src/imap/fetch.js";
@@ -45,6 +46,49 @@ describe("imap/fetch metadata-only range", () => {
         {
           uid: true,
           flags: true,
+          envelope: true,
+          bodyStructure: true,
+          internalDate: true,
+        },
+        { uid: true },
+      ],
+    ]);
+  });
+
+  /* REQUIREMENT end:comm/email-client-mcp/imap -- post-mutation metadata fetch reads flags without body fetch */
+  it("fetches metadata for explicit UIDs without requesting body parts", async () => {
+    const fetchCalls: unknown[] = [];
+    const client = {
+      fetch: async function* (...args: unknown[]) {
+        fetchCalls.push(args);
+        yield {
+          uid: 7,
+          flags: new Set(["\\Seen", "\\Flagged"]),
+          labels: new Set(["Important"]),
+          envelope: { subject: "Updated" },
+          bodyStructure: { type: "multipart/mixed" },
+          internalDate: new Date("2026-05-17T10:00:00.000Z"),
+        };
+      },
+      fetchOne: async () => {
+        throw new Error("metadata-by-uids must not fetch body parts");
+      },
+      download: async () => {
+        throw new Error("metadata-by-uids must not download attachments");
+      },
+    };
+
+    const messages = await fetchMetadataByUids(client as never, [7, 9]);
+
+    expect(messages.map((message) => message.uid)).toEqual([7]);
+    expect(messages[0]?.flags).toEqual(new Set(["\\Seen", "\\Flagged"]));
+    expect(fetchCalls).toEqual([
+      [
+        "7,9",
+        {
+          uid: true,
+          flags: true,
+          labels: true,
           envelope: true,
           bodyStructure: true,
           internalDate: true,
