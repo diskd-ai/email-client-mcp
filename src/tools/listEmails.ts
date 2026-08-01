@@ -11,6 +11,7 @@ import { z } from "zod";
 import { type AppError, imapError, notFound } from "../domain/errors.js";
 import { Err, Ok, type Result } from "../domain/result.js";
 import { fetchEnvelopesUidRange, withMailboxLock } from "../imap/fetch.js";
+import { toStoredPayload } from "../imap/mapper.js";
 import type { ImapPool } from "../imap/pool.js";
 
 export const listEmailsInput = z
@@ -23,8 +24,11 @@ export const listEmailsInput = z
     flagged: z.boolean().optional(),
     from: z.string().optional(),
     to: z.string().optional(),
+    cc: z.string().optional(),
     subject: z.string().optional(),
     since: z.string().datetime().optional(),
+    before: z.string().datetime().optional(),
+    textTerms: z.array(z.string().min(1)).min(1).max(20).optional(),
   })
   .strict();
 export type ListEmailsInput = z.infer<typeof listEmailsInput>;
@@ -35,6 +39,7 @@ export type ListedEmail = {
   readonly subject: string;
   readonly from: { readonly name: string | null; readonly address: string } | null;
   readonly to: ReadonlyArray<{ readonly name: string | null; readonly address: string }>;
+  readonly cc: ReadonlyArray<{ readonly name: string | null; readonly address: string }>;
   readonly date: string;
   readonly flags: readonly string[];
   readonly hasAttachments: boolean;
@@ -64,16 +69,31 @@ export const listEmails = async (
         ...(input.flagged === true ? { flagged: true } : {}),
         ...(input.from ? { from: input.from } : {}),
         ...(input.to ? { to: input.to } : {}),
+        ...(input.cc ? { cc: input.cc } : {}),
         ...(input.subject ? { subject: input.subject } : {}),
         ...(input.since ? { since: new Date(input.since) } : {}),
+        ...(input.before ? { before: new Date(input.before) } : {}),
       };
 
-      const allUidsResult = await client.search(query as unknown as Record<string, unknown>, {
-        uid: true,
-      });
-      const allUids = Array.isArray(allUidsResult)
-        ? allUidsResult.slice().sort((a, b) => b - a)
-        : [];
+      /** Run one native IMAP search and normalize non-array server responses to no matches. */
+      const searchUids = async (textTerm?: string): Promise<readonly number[]> => {
+        const result = await client.search(
+          { ...query, ...(textTerm ? { text: textTerm } : {}) } as unknown as Record<
+            string,
+            unknown
+          >,
+          { uid: true },
+        );
+        return Array.isArray(result) ? result : [];
+      };
+      const textTerms = input.textTerms ?? [];
+      let allUids = [...(await searchUids(textTerms[0]))];
+      for (const textTerm of textTerms.slice(1)) {
+        const matching = new Set(await searchUids(textTerm));
+        allUids = allUids.filter((uid) => matching.has(uid));
+        if (allUids.length === 0) break;
+      }
+      allUids.sort((a, b) => b - a);
       const cursor = input.cursor ?? null;
       const startIdx = cursor === null ? 0 : allUids.findIndex((u) => u < cursor);
       const safeStart = startIdx === -1 ? allUids.length : startIdx;
@@ -92,30 +112,25 @@ export const listEmails = async (
       const items: ListedEmail[] = [];
       for await (const env of fetchEnvelopesUidRange(client, minUid, maxUid)) {
         if (!wanted.has(env.uid)) continue;
-        const e = env.envelope ?? {};
+        const payload = toStoredPayload(env, {
+          accountId: input.account,
+          mailbox: input.mailbox,
+          uidValidity: 0,
+          fetchedAt: new Date(),
+          bodyText: null,
+          bodyHtml: null,
+          truncated: false,
+        });
         items.push({
           uid: env.uid,
-          messageId: e.messageId ?? null,
-          subject: e.subject ?? "",
-          from:
-            e.from && e.from.length > 0 && e.from[0]
-              ? {
-                  name: e.from[0].name && e.from[0].name.length > 0 ? e.from[0].name : null,
-                  address: e.from[0].address ?? "",
-                }
-              : null,
-          to: (e.to ?? []).map((a) => ({
-            name: a.name && a.name.length > 0 ? a.name : null,
-            address: a.address ?? "",
-          })),
-          date:
-            e.date instanceof Date
-              ? e.date.toISOString()
-              : typeof e.date === "string"
-                ? new Date(e.date).toISOString()
-                : "",
-          flags: env.flags instanceof Set ? Array.from(env.flags) : [...(env.flags ?? [])],
-          hasAttachments: false,
+          messageId: payload.messageId,
+          subject: payload.subject,
+          from: payload.from,
+          to: payload.to,
+          cc: payload.cc,
+          date: payload.date,
+          flags: payload.flags,
+          hasAttachments: payload.hasAttachments,
         });
       }
       // Sort by UID descending to match the cursor walk.
