@@ -19,7 +19,7 @@
  * factory, mapper) so unit tests can drive it without real I/O.
  */
 
-import { type Account, isOAuthAccount, type WatcherSettings } from "../config/schema.js";
+import type { Account, WatcherSettings } from "../config/schema.js";
 import { type AppError, errorMessage, type ImapError, imapError } from "../domain/errors.js";
 import { Err, type Result } from "../domain/result.js";
 import { type FetchedMessageLike, toStoredPayload } from "../imap/mapper.js";
@@ -36,6 +36,7 @@ export type SyncDeps = {
     readonly ensureMailbox: (
       mailboxId: string,
       displayName: string,
+      metadata: Readonly<Record<string, unknown>>,
     ) => Promise<Result<AppError, void>>;
     readonly upsertFolder: (
       mailboxId: string,
@@ -522,7 +523,11 @@ const syncFolder = async (
             });
           }
           if (hydrateBodies && bodyHydrationEnabledForFolder(watcher, folderPath, specialUse)) {
-            batchBodyHydrationCandidates.push({ mailboxId, folderId, externalId });
+            batchBodyHydrationCandidates.push({
+              mailboxId,
+              folderId,
+              externalId,
+            });
           }
           durableUid = uid;
         }
@@ -709,7 +714,10 @@ const syncFolder = async (
           truncated: false,
         });
         const externalId = externalIdFor(status.uidValidity, env.uid);
-        patches.push({ externalId, payloadPatch: reconciledFlagPatch(incoming) });
+        patches.push({
+          externalId,
+          payloadPatch: reconciledFlagPatch(incoming),
+        });
         fallbackPayloads.set(externalId, incoming);
       }
       if (patches.length > 0) {
@@ -800,11 +808,11 @@ export const runSyncOnce = async (
 ): Promise<SyncReport> => {
   const startedAt = deps.now().toISOString();
   const mailboxId = sanitizeMailboxId(account.name);
-  const displayName = isOAuthAccount(account)
-    ? account.email
-    : (account.full_name ?? account.email);
+  const displayName = account.full_name ?? account.email;
 
-  const ens = await deps.drive.ensureMailbox(mailboxId, displayName);
+  const ens = await deps.drive.ensureMailbox(mailboxId, displayName, {
+    email: account.email,
+  });
   if (ens.tag === "Err") {
     return {
       accountId: account.name,

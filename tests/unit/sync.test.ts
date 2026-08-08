@@ -18,8 +18,16 @@ const watcherDefault: WatcherSettings = {
   enabled: true,
   interval_ms: 60_000,
   flag_reconcile_window: 0,
-  body_hydration: { enabled: false, max_messages_per_tick: 50, skip_all_mail: true },
-  recent_first: { enabled: true, initial_recent_window: 1000, backfill_window_per_tick: 500 },
+  body_hydration: {
+    enabled: false,
+    max_messages_per_tick: 50,
+    skip_all_mail: true,
+  },
+  recent_first: {
+    enabled: true,
+    initial_recent_window: 1000,
+    backfill_window_per_tick: 500,
+  },
 };
 
 const watcherWithBodyHydration = (maxMessagesPerTick = 50): WatcherSettings => ({
@@ -32,7 +40,10 @@ const watcherWithBodyHydration = (maxMessagesPerTick = 50): WatcherSettings => (
 });
 
 type FakeImapState = {
-  readonly folders: ReadonlyArray<{ readonly path: string; readonly specialUse: string | null }>;
+  readonly folders: ReadonlyArray<{
+    readonly path: string;
+    readonly specialUse: string | null;
+  }>;
   readonly messagesByFolder: Map<
     string,
     {
@@ -44,7 +55,7 @@ type FakeImapState = {
 };
 
 type FakeDriveState = {
-  mailboxes: Map<string, { displayName: string }>;
+  mailboxes: Map<string, { displayName: string; metadata: Readonly<Record<string, unknown>> }>;
   folders: Map<
     string,
     Map<
@@ -62,8 +73,14 @@ const buildFakeDeps = (
   imap: FakeImapState,
   drive: FakeDriveState,
   options?: {
-    readonly upsertMessagesError?: { triggerOnCallNumber: number; message: string };
-    readonly uploadAttachmentError?: { readonly attachmentId: string; readonly message: string };
+    readonly upsertMessagesError?: {
+      triggerOnCallNumber: number;
+      message: string;
+    };
+    readonly uploadAttachmentError?: {
+      readonly attachmentId: string;
+      readonly message: string;
+    };
     readonly uploadedAttachments?: Array<{
       readonly mailboxId: string;
       readonly folderId: string;
@@ -95,8 +112,8 @@ const buildFakeDeps = (
   let upsertCalls = 0;
   return {
     drive: {
-      ensureMailbox: async (mailboxId, displayName) => {
-        if (!drive.mailboxes.has(mailboxId)) drive.mailboxes.set(mailboxId, { displayName });
+      ensureMailbox: async (mailboxId, displayName, metadata) => {
+        drive.mailboxes.set(mailboxId, { displayName, metadata });
         if (!drive.folders.has(mailboxId)) drive.folders.set(mailboxId, new Map());
         return Ok(undefined);
       },
@@ -250,8 +267,16 @@ const buildFakeDeps = (
       folderStatus: async (_acctId, path) => {
         const f = imap.messagesByFolder.get(path);
         if (f === undefined)
-          return Err({ kind: "ImapError", accountId: _acctId, message: "no folder" });
-        return Ok({ uidValidity: f.uidValidity, uidNext: f.uidNext, messages: f.msgs.length });
+          return Err({
+            kind: "ImapError",
+            accountId: _acctId,
+            message: "no folder",
+          });
+        return Ok({
+          uidValidity: f.uidValidity,
+          uidNext: f.uidNext,
+          messages: f.msgs.length,
+        });
       },
       fetchMetadataRange: async function* (_acctId, path, fromUid, toUid) {
         options?.fetchMetadataRangeCalls?.push(`${path}:${fromUid}:${toUid}`);
@@ -342,6 +367,20 @@ const mkMsgWithAttachment = (uid: number, partId = "2", sizeBytes = 12): Fetched
 });
 
 describe("sync/runSyncOnce", () => {
+  it("persists the real email separately from the human account label", async () => {
+    /* REQ-3066-004: IMAP sync must preserve explicit email metadata without parsing displayName. */
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const imap: FakeImapState = { folders: [], messagesByFolder: new Map() };
+
+    const report = await runSyncOnce(buildFakeDeps(imap, drive), acct, watcherDefault);
+
+    expect(report.error).toBeNull();
+    expect(drive.mailboxes.get("exchange-work")).toEqual({
+      displayName: "Work",
+      metadata: { email: "work@example.com" },
+    });
+  });
+
   /* REQUIREMENT end:comm/email-client-mcp/sync -- syncs new UIDs to messagesStore on a fresh folder */
   it("upserts all new messages on a fresh folder", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
@@ -349,7 +388,14 @@ describe("sync/runSyncOnce", () => {
     const imap: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: null }],
       messagesByFolder: new Map([
-        ["INBOX", { uidValidity: 100, uidNext: 4, msgs: [mkMsg(1), mkMsg(2), mkMsg(3)] }],
+        [
+          "INBOX",
+          {
+            uidValidity: 100,
+            uidNext: 4,
+            msgs: [mkMsg(1), mkMsg(2), mkMsg(3)],
+          },
+        ],
       ]),
     };
     const deps = buildFakeDeps(imap, drive, { upsertMessagesCalls });
@@ -434,7 +480,10 @@ describe("sync/runSyncOnce", () => {
     deps.drive.upsertFolder = async (...args) => {
       upsertFolderCalls += 1;
       if (upsertFolderCalls === 2) {
-        return Err({ kind: "DriveError", message: "checkpoint failed" } as AppError);
+        return Err({
+          kind: "DriveError",
+          message: "checkpoint failed",
+        } as AppError);
       }
       return originalUpsertFolder(...args);
     };
@@ -497,7 +546,11 @@ describe("sync/runSyncOnce", () => {
     };
     const watcher: WatcherSettings = {
       ...watcherDefault,
-      recent_first: { enabled: true, initial_recent_window: 2, backfill_window_per_tick: 2 },
+      recent_first: {
+        enabled: true,
+        initial_recent_window: 2,
+        backfill_window_per_tick: 2,
+      },
     };
 
     await runSyncOnce(buildFakeDeps(imap, drive, { notifyCalls }), acct, watcher);
@@ -626,7 +679,7 @@ describe("sync/runSyncOnce", () => {
   /* REQUIREMENT end:comm/email-client-mcp/sync -- partial legacy lastSyncedUid state migrates to recent-first instead of continuing old-first */
   it("migrates partial legacy sync state to recent-first", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
-    drive.mailboxes.set("exchange-work", { displayName: "Work" });
+    drive.mailboxes.set("exchange-work", { displayName: "Work", metadata: {} });
     drive.folders.set(
       "exchange-work",
       new Map([
@@ -715,7 +768,11 @@ describe("sync/runSyncOnce", () => {
     const watcher: WatcherSettings = {
       ...watcherDefault,
       flag_reconcile_window: 5,
-      recent_first: { enabled: true, initial_recent_window: 2, backfill_window_per_tick: 2 },
+      recent_first: {
+        enabled: true,
+        initial_recent_window: 2,
+        backfill_window_per_tick: 2,
+      },
     };
 
     await runSyncOnce(buildFakeDeps(imap, drive), acct, watcher);
@@ -723,7 +780,10 @@ describe("sync/runSyncOnce", () => {
     const fetchMetadataRangeCalls: string[] = [];
     const fetchEnvelopeRangeCalls: string[] = [];
     const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, { fetchMetadataRangeCalls, fetchEnvelopeRangeCalls }),
+      buildFakeDeps(imap, drive, {
+        fetchMetadataRangeCalls,
+        fetchEnvelopeRangeCalls,
+      }),
       acct,
       watcher,
     );
@@ -751,7 +811,11 @@ describe("sync/runSyncOnce", () => {
     };
 
     const rep = await runSyncOnce(
-      buildFakeDeps(imap, drive, { uploadedAttachments, downloadCalls, fetchMetadataRangeCalls }),
+      buildFakeDeps(imap, drive, {
+        uploadedAttachments,
+        downloadCalls,
+        fetchMetadataRangeCalls,
+      }),
       acct,
       watcherDefault,
     );
@@ -870,7 +934,11 @@ describe("sync/runSyncOnce", () => {
       messagesByFolder: new Map([
         [
           "INBOX",
-          { uidValidity: 14, uidNext: 6, msgs: [mkMsg(1), mkMsg(2), mkMsg(3), mkMsg(4), mkMsg(5)] },
+          {
+            uidValidity: 14,
+            uidNext: 6,
+            msgs: [mkMsg(1), mkMsg(2), mkMsg(3), mkMsg(4), mkMsg(5)],
+          },
         ],
       ]),
     };
@@ -984,7 +1052,14 @@ describe("sync/runSyncOnce", () => {
     const imap2: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: null }],
       messagesByFolder: new Map([
-        ["INBOX", { uidValidity: 1, uidNext: 5, msgs: [mkMsg(1), mkMsg(2), mkMsg(3), mkMsg(4)] }],
+        [
+          "INBOX",
+          {
+            uidValidity: 1,
+            uidNext: 5,
+            msgs: [mkMsg(1), mkMsg(2), mkMsg(3), mkMsg(4)],
+          },
+        ],
       ]),
     };
     const rep = await runSyncOnce(buildFakeDeps(imap2, drive), acct, watcherDefault);
@@ -1026,7 +1101,7 @@ describe("sync/runSyncOnce", () => {
 
   it("falls back to metadata upsert when flag reconciliation patch misses a row", async () => {
     const drive: FakeDriveState = {
-      mailboxes: new Map([["exchange-work", { displayName: "Work" }]]),
+      mailboxes: new Map([["exchange-work", { displayName: "Work", metadata: {} }]]),
       folders: new Map([
         [
           "exchange-work",
@@ -1099,7 +1174,7 @@ describe("sync/runSyncOnce", () => {
   /* REQUIREMENT end:comm/email-client-mcp/sync-review-retention -- Review messages disappear only after explicit delete or send */
   it("preserves the platform-managed Review folder when absent from IMAP", async () => {
     const drive: FakeDriveState = {
-      mailboxes: new Map([["exchange-work", { displayName: "Work" }]]),
+      mailboxes: new Map([["exchange-work", { displayName: "Work", metadata: {} }]]),
       folders: new Map([
         [
           "exchange-work",

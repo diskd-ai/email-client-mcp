@@ -1,6 +1,6 @@
 {
   "name": "@diskd-ai/email-client-mcp",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "description": "Drive-backed multi-account email MCP with reliable IMAP-to-mailboxes sync.",
   "license": "LGPL-3.0-or-later",
   "repository": {
@@ -34,7 +34,7 @@
     "prepublishOnly": "bun run build && bun run test"
   },
   "dependencies": {
-    "@diskd-ai/sdk": "6.0.2",
+    "@diskd-ai/sdk": "6.0.3",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "imapflow": "^1.2.9",
     "smol-toml": "^1.6.0",

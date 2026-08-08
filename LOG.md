@@ -1,5 +1,9 @@
 # LOG
 
+## 2026-08-08
+
+- `end:comm/email-client-mcp/sync`: preserve each configured mailbox email as opaque Drive metadata while keeping `displayName` human-readable, and refresh missing metadata for existing mailboxes so downstream search uses explicit identity instead of parsing labels (Redmine 3066).
+
 ## 2026-08-05
 
 - `end:comm/email-client-mcp`: adopted `@diskd-ai/sdk` 6.0.2 so the ingestion-side consumer stays aligned with the published unique mailbox search contract used by downstream workers (Redmine 3056).

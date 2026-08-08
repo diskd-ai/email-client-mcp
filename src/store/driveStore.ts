@@ -60,6 +60,7 @@ export type DriveStore = {
   readonly ensureMailbox: (
     mailboxId: string,
     displayName: string,
+    metadata: Readonly<Record<string, unknown>>,
   ) => Promise<Result<DriveError, void>>;
   readonly listMailboxes: () => Promise<Result<DriveError, readonly string[]>>;
   readonly upsertFolder: (
@@ -177,11 +178,21 @@ const callDriveJsonRpc = async <T>(
 const createSegmentedMailbox = async (
   mailboxId: string,
   displayName: string,
+  metadata: Readonly<Record<string, unknown>>,
+  recreate: boolean,
 ): Promise<CreateMailboxJsonRpcResult> =>
   callDriveJsonRpc<CreateMailboxJsonRpcResult>("messages_store/create_mailbox", {
     mailbox_id: mailboxId,
     display_name: displayName,
+    metadata,
+    ...(recreate ? { recreate: true } : {}),
   });
+
+/** Check whether Drive already holds the caller-owned mailbox metadata fields. */
+const hasMailboxMetadata = (
+  actual: Readonly<Record<string, unknown>>,
+  expected: Readonly<Record<string, unknown>>,
+): boolean => Object.entries(expected).every(([key, value]) => actual[key] === value);
 
 const patchMessagePayloads = async (
   mailboxId: string,
@@ -268,16 +279,20 @@ const toUploadAttachmentResult = (existing: ExistingAttachment): UploadAttachmen
 });
 
 export const buildDriveStore = (store: MessagesStore): DriveStore => ({
-  async ensureMailbox(mailboxId, displayName) {
+  async ensureMailbox(mailboxId, displayName, metadata) {
     if (!isValidMailboxId(mailboxId)) {
       return Err(driveError(`mailboxId '${mailboxId}' is not a valid slug`));
     }
     const list = await wrap("listMailboxes", () => store.listMailboxes());
     if (list.tag === "Err") return list;
-    const exists = list.value.some((m) => m.mailboxId === mailboxId);
-    if (!exists) {
+    const existing = list.value.find((mailbox) => mailbox.mailboxId === mailboxId);
+    const needsMetadataRefresh =
+      existing === undefined ||
+      existing.displayName !== displayName ||
+      !hasMailboxMetadata(existing.metadata, metadata);
+    if (needsMetadataRefresh) {
       const create = await wrap("createMailbox", () =>
-        createSegmentedMailbox(mailboxId, displayName),
+        createSegmentedMailbox(mailboxId, displayName, metadata, existing !== undefined),
       );
       if (create.tag === "Err" && !isConflict(create.error)) return create;
     }
@@ -316,7 +331,12 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
   async listFolders(mailboxId) {
     const r = await wrap("listFolders", () => store.mailbox({ mailboxId }).listFolders());
     if (r.tag === "Err") return r;
-    return Ok(r.value.map((f) => ({ folderId: f.folderId, messageCount: f.messageCount })));
+    return Ok(
+      r.value.map((f) => ({
+        folderId: f.folderId,
+        messageCount: f.messageCount,
+      })),
+    );
   },
   async deleteFolder(mailboxId, folderId) {
     const r = await wrap("folder.delete", () => folderScoped(store, mailboxId, folderId).delete());
@@ -330,7 +350,10 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
       payload: p as unknown as Readonly<Record<string, unknown>>,
     }));
     const r = await wrap("folder.upsertBatch", () =>
-      folderScoped(store, mailboxId, folderId).upsertBatch({ items, autoCommit: false }),
+      folderScoped(store, mailboxId, folderId).upsertBatch({
+        items,
+        autoCommit: false,
+      }),
     );
     if (r.tag === "Err") return r;
     return Ok({ inserted: r.value.inserted, updated: r.value.updated });
@@ -369,7 +392,10 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
     };
 
     const deleteExistingAttachment = async (): Promise<void> => {
-      await attachments.delete({ attachmentId: attachment.attachmentId, autoCommit: false });
+      await attachments.delete({
+        attachmentId: attachment.attachmentId,
+        autoCommit: false,
+      });
     };
 
     const uploadStart = async (): Promise<IdempotentUploadStartResult> =>

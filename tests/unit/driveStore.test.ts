@@ -38,7 +38,11 @@ const buildStore = (options?: {
               intentId: "already-uploaded",
               uploadUrl: "already-uploaded://attachment",
             }
-          : { alreadyUploaded: false, intentId: "intent-1", uploadUrl: "/api/v1/drive/upload" };
+          : {
+              alreadyUploaded: false,
+              intentId: "intent-1",
+              uploadUrl: "/api/v1/drive/upload",
+            };
     }),
     uploadCommit: vi.fn(async () => {
       uploadCommitCalls += 1;
@@ -48,7 +52,11 @@ const buildStore = (options?: {
       ) {
         throw new Error("JSON-RPC error: CONFLICT");
       }
-      return { attachmentId: "14:94:2", driveInode: "inode-new", sizeBytes: 11 };
+      return {
+        attachmentId: "14:94:2",
+        driveInode: "inode-new",
+        sizeBytes: 11,
+      };
     }),
     list: vi.fn(async () => [
       {
@@ -90,8 +98,16 @@ describe("store/buildDriveStore ensureMailbox", () => {
   });
 
   it("creates new mailboxes without a storage-version parameter and still runs init", async () => {
-    const createMailbox = vi.fn(async () => ({ mailboxId: "mail-w1", dbInode: "", drivePath: "" }));
-    const init = vi.fn(async () => ({ mailboxId: "mail-w1", schemaVersion: 2 }));
+    /* REQ-3066-010: New mailboxes must persist explicit email metadata before schema initialization. */
+    const createMailbox = vi.fn(async () => ({
+      mailboxId: "mail-w1",
+      dbInode: "",
+      drivePath: "",
+    }));
+    const init = vi.fn(async () => ({
+      mailboxId: "mail-w1",
+      schemaVersion: 2,
+    }));
     const store = {
       listMailboxes: vi.fn(async () => []),
       createMailbox,
@@ -113,7 +129,9 @@ describe("store/buildDriveStore ensureMailbox", () => {
     );
 
     const drive = buildDriveStore(store as never);
-    const result = await drive.ensureMailbox("mail-w1", "w1@example.com");
+    const result = await drive.ensureMailbox("mail-w1", "Work", {
+      email: "w1@example.com",
+    });
 
     expect(result.tag).toBe("Ok");
     expect(createMailbox).not.toHaveBeenCalled();
@@ -130,20 +148,30 @@ describe("store/buildDriveStore ensureMailbox", () => {
       method: "messages_store/create_mailbox",
       params: {
         mailbox_id: "mail-w1",
-        display_name: "w1@example.com",
+        display_name: "Work",
+        metadata: { email: "w1@example.com" },
       },
     });
     expect(init).toHaveBeenCalledTimes(1);
   });
 
-  it("does not recreate existing mailboxes, preserving current mailbox metadata", async () => {
-    const createMailbox = vi.fn(async () => ({ mailboxId: "mail-w1", dbInode: "", drivePath: "" }));
-    const init = vi.fn(async () => ({ mailboxId: "mail-w1", schemaVersion: 1 }));
+  it("refreshes metadata for an existing mailbox without changing its identity", async () => {
+    /* REQ-3066-005: Existing mailboxes must receive current email metadata during sync bootstrap. */
+    const createMailbox = vi.fn(async () => ({
+      mailboxId: "mail-w1",
+      dbInode: "",
+      drivePath: "",
+    }));
+    const init = vi.fn(async () => ({
+      mailboxId: "mail-w1",
+      schemaVersion: 1,
+    }));
     const store = {
       listMailboxes: vi.fn(async () => [
         {
           mailboxId: "mail-w1",
-          displayName: "w1@example.com",
+          displayName: "Old label",
+          metadata: {},
           dbInode: "inode-1",
           recordCount: 0,
           sizeBytes: 0,
@@ -153,17 +181,47 @@ describe("store/buildDriveStore ensureMailbox", () => {
       createMailbox,
       mailbox: vi.fn(() => ({ init })),
     };
+    const calls: Array<{ url: string | URL | Request; init?: RequestInit }> = [];
+    stubFetch(
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url, init });
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { mailbox_id: "mail-w1", db_inode: "", drive_path: "" },
+          }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    );
 
     const drive = buildDriveStore(store as never);
-    const result = await drive.ensureMailbox("mail-w1", "w1@example.com");
+    const result = await drive.ensureMailbox("mail-w1", "Work", {
+      email: "w1@example.com",
+    });
 
     expect(result.tag).toBe("Ok");
     expect(createMailbox).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
+      method: "messages_store/create_mailbox",
+      params: {
+        mailbox_id: "mail-w1",
+        display_name: "Work",
+        metadata: { email: "w1@example.com" },
+        recreate: true,
+      },
+    });
     expect(init).toHaveBeenCalledTimes(1);
   });
 
   it("treats mailbox already exists from createMailbox as idempotent success", async () => {
-    const init = vi.fn(async () => ({ mailboxId: "mail-w1", schemaVersion: 2 }));
+    /* REQ-3066-011: Concurrent mailbox creation must remain idempotent when metadata is supplied. */
+    const init = vi.fn(async () => ({
+      mailboxId: "mail-w1",
+      schemaVersion: 2,
+    }));
     const store = {
       listMailboxes: vi.fn(async () => []),
       createMailbox: vi.fn(),
@@ -176,7 +234,10 @@ describe("store/buildDriveStore ensureMailbox", () => {
             JSON.stringify({
               jsonrpc: "2.0",
               id: 1,
-              error: { code: -32000, message: "mailbox already exists: mail-w1" },
+              error: {
+                code: -32000,
+                message: "mailbox already exists: mail-w1",
+              },
             }),
             { status: 200 },
           ),
@@ -184,7 +245,9 @@ describe("store/buildDriveStore ensureMailbox", () => {
     );
 
     const drive = buildDriveStore(store as never);
-    const result = await drive.ensureMailbox("mail-w1", "w1@example.com");
+    const result = await drive.ensureMailbox("mail-w1", "Work", {
+      email: "w1@example.com",
+    });
 
     expect(result.tag).toBe("Ok");
     expect(init).toHaveBeenCalledTimes(1);
@@ -222,7 +285,11 @@ describe("store/buildDriveStore patchMessages", () => {
     const result = await drive.patchMessages("mail-w1", "INBOX", [
       {
         externalId: "14:94",
-        payloadPatch: { flags: ["\\Seen"], labels: ["Important"], fetchedAt: "now" },
+        payloadPatch: {
+          flags: ["\\Seen"],
+          labels: ["Important"],
+          fetchedAt: "now",
+        },
       },
     ]);
 
@@ -273,7 +340,9 @@ describe("store/buildDriveStore attachment upload", () => {
         for await (const chunk of init?.body as AsyncIterable<Uint8Array>) {
           consumed.push(Buffer.from(chunk).toString("utf8"));
         }
-        return new Response(JSON.stringify({ etag: "etag-1" }), { status: 200 });
+        return new Response(JSON.stringify({ etag: "etag-1" }), {
+          status: 200,
+        });
       }) as typeof fetch,
     );
 
@@ -355,7 +424,9 @@ describe("store/buildDriveStore attachment upload", () => {
   });
 
   it("treats wire-compatible idempotent upload-start sentinel as an already stored attachment", async () => {
-    const { store, attachments } = buildStore({ sentinelAlreadyUploaded: true });
+    const { store, attachments } = buildStore({
+      sentinelAlreadyUploaded: true,
+    });
     stubFetch(vi.fn() as typeof fetch);
 
     const drive = buildDriveStore(store as never);
@@ -418,7 +489,10 @@ describe("store/buildDriveStore attachment upload", () => {
   });
 
   it("overwrites an existing attachment when upload-start reports conflicting metadata", async () => {
-    const { store, attachments } = buildStore({ uploadStartConflictOnce: true, listedSize: 12 });
+    const { store, attachments } = buildStore({
+      uploadStartConflictOnce: true,
+      listedSize: 12,
+    });
     stubFetch(
       vi.fn(
         async () => new Response(JSON.stringify({ etag: "etag-1" }), { status: 200 }),
@@ -450,7 +524,10 @@ describe("store/buildDriveStore attachment upload", () => {
   });
 
   it("overwrites an existing attachment when upload-commit reports conflicting metadata", async () => {
-    const { store, attachments } = buildStore({ commitConflictOnce: true, listedSize: 12 });
+    const { store, attachments } = buildStore({
+      commitConflictOnce: true,
+      listedSize: 12,
+    });
     stubFetch(
       vi.fn(
         async () => new Response(JSON.stringify({ etag: "etag-1" }), { status: 200 }),

@@ -1,11 +1,10 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "@diskd-ai/email-client-mcp",
       "dependencies": {
-        "@diskd-ai/sdk": "6.0.2",
+        "@diskd-ai/sdk": "6.0.3",
         "@modelcontextprotocol/sdk": "^1.26.0",
         "imapflow": "^1.2.9",
         "smol-toml": "^1.6.0",
@@ -39,7 +38,7 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.4.7", "", { "os": "win32", "cpu": "x64" }, "sha512-qEpGjSkPC3qX4ycbMUthXvi9CkRq7kZpkqMY1OyhmYlYLnANnooDQ7hDerM8+0NJ+DZKVnsIc07h30XOpt7LtQ=="],
 
-    "@diskd-ai/sdk": ["@diskd-ai/sdk@6.0.2", "", { "dependencies": { "undici": "^7.21.0" }, "optionalDependencies": { "tiktoken": "^1.0.22" }, "peerDependencies": { "typeorm": "^0.3.28" }, "optionalPeers": ["typeorm"] }, "sha512-ZKqFpfdAlKtbd19A5iDrgFBiBwGeZLNZAEq51WfPMZZRy+gTy7ZU+5JK0wqYa7ipJ6T2iJfY7llMuiYl3SGqeQ=="],
+    "@diskd-ai/sdk": ["@diskd-ai/sdk@6.0.3", "", { "dependencies": { "undici": "^7.21.0" }, "optionalDependencies": { "tiktoken": "^1.0.22" }, "peerDependencies": { "typeorm": "^0.3.28" }, "optionalPeers": ["typeorm"] }, "sha512-ImbWI03YBvrL6NN4j2eJLjGOkR4hkOAzHmBpicJcXqrLLP7LH6QvM3ZyFdwSB3VNYty305gFFOzi4oedEvtL6w=="],
 
     "@esbuild/aix-ppc64": ["@esbuild/aix-ppc64@0.27.7", "", { "os": "aix", "cpu": "ppc64" }, "sha512-EKX3Qwmhz1eMdEJokhALr0YiD0lhQNwDqkPYyPhiSwKrh7/4KRjQc04sZ8db+5DVVnZ1LmbNDI1uAMPEUBnQPg=="],
 
