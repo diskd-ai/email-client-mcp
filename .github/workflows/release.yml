@@ -6,9 +6,8 @@ name: Release
 #     and pick a bump type (patch / minor / major). The job bumps the
 #     version in package.json, commits, tags, pushes, then publishes.
 #
-# Required repo secret:
-#  - NPM_TOKEN — npmjs.com granular token with publish + bypass-2FA
-#                for the @diskd-ai scope.
+# Publishing uses the npm Trusted Publisher configured for this repository and
+# workflow. No long-lived npm publish token is required.
 
 on:
   push:
@@ -78,10 +77,20 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Verify npm auth before release mutation
-        run: npm whoami --registry=https://registry.npmjs.org/
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Verify trusted publishing prerequisites
+        run: |
+          NODE_VERSION="$(node --version)"
+          NPM_VERSION="$(npm --version)"
+          echo "Node.js: $NODE_VERSION"
+          echo "npm: $NPM_VERSION"
+          if [ "$(printf '%s\n' '11.5.1' "$NPM_VERSION" | sort -V | head -n 1)" != '11.5.1' ]; then
+            echo "npm $NPM_VERSION does not support trusted publishing; version 11.5.1 or newer is required" >&2
+            exit 1
+          fi
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ] || [ -z "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+            echo "GitHub Actions did not provide the OIDC request environment" >&2
+            exit 1
+          fi
 
       # ---- workflow_dispatch path: bump version + tag + push ----
       - name: Bump version + tag + push (workflow_dispatch)
@@ -118,17 +127,13 @@ jobs:
       - name: npm publish (provenance enabled)
         if: github.event_name == 'push' || inputs.dry_run == false
         run: npm publish --provenance --access=public
-        env:
-          # NODE_AUTH_TOKEN is what `actions/setup-node` configures the
-          # generated ~/.npmrc to read for registry.npmjs.org.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Dry run summary
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
         run: |
           echo "### Release dry run passed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Build, tests, and npm auth validation completed without publishing." >> "$GITHUB_STEP_SUMMARY"
+          echo "Build, tests, and trusted publishing prerequisite validation completed without publishing." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary
         if: github.event_name == 'push' || inputs.dry_run == false

@@ -1,5 +1,9 @@
 # LOG
 
+## 2026-08-09
+
+- `end:comm/email-client-mcp/release`: publish from the repository's npm Trusted Publisher identity without a long-lived write token, preventing OTP-gated legacy authentication from blocking releases.
+
 ## 2026-08-08
 
 - `end:comm/email-client-mcp/sync`: preserve each configured mailbox email as opaque Drive metadata while keeping `displayName` human-readable, and refresh missing metadata for existing mailboxes so downstream search uses explicit identity instead of parsing labels (Redmine 3066).
