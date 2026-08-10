@@ -1,5 +1,9 @@
 # LOG
 
+## 2026-08-10
+
+- `end:comm/email-client-mcp/sync`: persist ImapFlow's provider hierarchy delimiter with every folder sync checkpoint so downstream Inbox queries can distinguish real descendants from same-prefix sibling folders (Redmine 2910).
+
 ## 2026-08-09
 
 - `end:comm/email-client-mcp/release`: publish from the repository's npm Trusted Publisher identity without a long-lived write token, preventing OTP-gated legacy authentication from blocking releases.

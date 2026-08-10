@@ -25,7 +25,12 @@ import { Err, type Result } from "../domain/result.js";
 import { type FetchedMessageLike, toStoredPayload } from "../imap/mapper.js";
 import type { UploadAttachmentResult } from "../store/attachments.js";
 import { externalIdFor, sanitizeMailboxId } from "../store/conventions.js";
-import type { StoredAttachment, StoredEmailPayload, SyncState } from "../store/payloadTypes.js";
+import type {
+  StoredAttachment,
+  StoredEmailPayload,
+  SyncFolderMetadata,
+  SyncState,
+} from "../store/payloadTypes.js";
 import { type BodyHydrationRef, hydrateStoredMessageBodies } from "./bodyHydration.js";
 
 const BATCH_SIZE = 50;
@@ -42,7 +47,7 @@ export type SyncDeps = {
       mailboxId: string,
       folderId: string,
       displayName: string,
-      metadata: SyncState,
+      metadata: SyncFolderMetadata,
     ) => Promise<Result<AppError, void>>;
     readonly getFolder: (
       mailboxId: string,
@@ -85,7 +90,9 @@ export type SyncDeps = {
   readonly imap: {
     readonly listFolders: (
       accountId: string,
-    ) => Promise<Result<ImapError, readonly { path: string; specialUse: string | null }[]>>;
+    ) => Promise<
+      Result<ImapError, readonly { path: string; specialUse: string | null; delimiter: string }[]>
+    >;
     readonly folderStatus: (
       accountId: string,
       path: string,
@@ -297,12 +304,19 @@ type SyncFolderOptions = {
   readonly runMaintenance: boolean;
 };
 
+/** Attach the current provider delimiter to every persisted sync checkpoint. */
+const makeSyncFolderMetadata = (state: SyncState, delimiter: string): SyncFolderMetadata => ({
+  ...state,
+  delimiter,
+});
+
 const syncFolder = async (
   deps: SyncDeps,
   account: Account,
   mailboxId: string,
   folderPath: string,
   specialUse: string | null,
+  delimiter: string,
   watcher: WatcherSettings,
   options: SyncFolderOptions,
 ): Promise<SyncFolderReport> => {
@@ -371,7 +385,7 @@ const syncFolder = async (
   // Initial folder upsert with fresh metadata. We rewrite metadata at
   // each successful batch so the on-disk checkpoint mirrors progress.
   const writeState = async (next: SyncState): Promise<Result<AppError, void>> =>
-    deps.drive.upsertFolder(mailboxId, folderId, folderId, next);
+    deps.drive.upsertFolder(mailboxId, folderId, folderId, makeSyncFolderMetadata(next, delimiter));
 
   const recentFrom = Math.max(1, status.uidNext - recentFirst.initial_recent_window);
   const needsRecentBootstrap =
@@ -852,9 +866,18 @@ export const runSyncOnce = async (
   const reports: SyncFolderReport[] = [];
   for (let i = 0; i < filteredFolders.length; i += 1) {
     const f = filteredFolders[i] as (typeof filteredFolders)[number];
-    const r = await syncFolder(deps, account, mailboxId, f.path, f.specialUse, watcher, {
-      runMaintenance: i === maintenanceIndex,
-    });
+    const r = await syncFolder(
+      deps,
+      account,
+      mailboxId,
+      f.path,
+      f.specialUse,
+      f.delimiter,
+      watcher,
+      {
+        runMaintenance: i === maintenanceIndex,
+      },
+    );
     reports.push(r);
   }
 

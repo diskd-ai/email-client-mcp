@@ -12,7 +12,7 @@ import type { diskd as DiskdNs } from "@diskd-ai/sdk";
 import { type DriveError, driveError } from "../domain/errors.js";
 import { Err, Ok, type Result } from "../domain/result.js";
 import { isValidMailboxId } from "./conventions.js";
-import type { StoredAttachment, StoredEmailPayload, SyncState } from "./payloadTypes.js";
+import type { StoredAttachment, StoredEmailPayload, SyncFolderMetadata } from "./payloadTypes.js";
 
 type MessagesStore = ReturnType<typeof DiskdNs.os.messagesStore>;
 type MailboxScoped = ReturnType<MessagesStore["mailbox"]>;
@@ -67,7 +67,7 @@ export type DriveStore = {
     mailboxId: string,
     folderId: string,
     displayName: string,
-    metadata: SyncState,
+    metadata: SyncFolderMetadata,
   ) => Promise<Result<DriveError, void>>;
   readonly getFolder: (
     mailboxId: string,

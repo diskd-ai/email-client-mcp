@@ -126,6 +126,7 @@ const main = async (): Promise<void> => {
             list.map((f) => ({
               path: f.path,
               specialUse: (f.specialUse ?? null) as string | null,
+              delimiter: f.delimiter,
             })),
           );
         } catch (cause) {

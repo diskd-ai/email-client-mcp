@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Account, WatcherSettings } from "../../src/config/schema.js";
 import type { AppError, ImapError } from "../../src/domain/errors.js";
-import { Err, Ok, type Result } from "../../src/domain/result.js";
+import { Err, Ok } from "../../src/domain/result.js";
 import type { FetchedMessageLike } from "../../src/imap/mapper.js";
 import type { StoredEmailPayload, SyncState } from "../../src/store/payloadTypes.js";
 import { runSyncOnce, type SyncDeps } from "../../src/sync/sync.js";
@@ -43,6 +43,7 @@ type FakeImapState = {
   readonly folders: ReadonlyArray<{
     readonly path: string;
     readonly specialUse: string | null;
+    readonly delimiter?: string;
   }>;
   readonly messagesByFolder: Map<
     string,
@@ -260,10 +261,13 @@ const buildFakeDeps = (
     },
     imap: {
       listFolders: async () =>
-        Ok(imap.folders) as unknown as Result<
-          ImapError,
-          readonly { path: string; specialUse: string | null }[]
-        >,
+        Ok(
+          imap.folders.map((folder) => ({
+            path: folder.path,
+            specialUse: folder.specialUse,
+            delimiter: folder.delimiter ?? "/",
+          })),
+        ),
       folderStatus: async (_acctId, path) => {
         const f = imap.messagesByFolder.get(path);
         if (f === undefined)
@@ -379,6 +383,22 @@ describe("sync/runSyncOnce", () => {
       displayName: "Work",
       metadata: { email: "work@example.com" },
     });
+  });
+
+  /* REQ-2910-009: IMAP sync persists the provider hierarchy delimiter with every folder checkpoint. */
+  it("persists the provider folder delimiter in messagesStore metadata", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const imap: FakeImapState = {
+      folders: [{ path: "Aix.Conservatory", specialUse: null, delimiter: "." }],
+      messagesByFolder: new Map([["Aix.Conservatory", { uidValidity: 100, uidNext: 1, msgs: [] }]]),
+    };
+
+    const report = await runSyncOnce(buildFakeDeps(imap, drive), acct, watcherDefault);
+
+    expect(report.error).toBeNull();
+    expect(drive.folders.get("exchange-work")?.get("Aix.Conservatory")?.metadata.delimiter).toBe(
+      ".",
+    );
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- syncs new UIDs to messagesStore on a fresh folder */

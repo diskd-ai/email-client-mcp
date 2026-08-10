@@ -92,3 +92,8 @@ export type SyncState = {
   readonly lastSyncFinishedAt: string | null;
   readonly lastSyncError: string | null;
 };
+
+/** Folder metadata combines restart-safe sync state with the provider hierarchy delimiter. */
+export type SyncFolderMetadata = SyncState & {
+  readonly delimiter: string;
+};
