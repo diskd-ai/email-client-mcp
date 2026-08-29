@@ -126,19 +126,6 @@ const accountsSchema = z
       });
     }
 
-    const duplicateEmail = accounts.find((account, index) => {
-      const email = account.email.trim().toLowerCase();
-      return (
-        accounts.findIndex((candidate) => candidate.email.trim().toLowerCase() === email) !== index
-      );
-    });
-    if (duplicateEmail !== undefined) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `duplicate account email: ${duplicateEmail.email.trim().toLowerCase()}`,
-      });
-    }
-
     const duplicateMailboxId = accounts.find((account, index) => {
       const mailboxId = sanitizeMailboxId(account.name);
       return (

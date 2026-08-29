@@ -74,17 +74,12 @@ describe("config/schema", () => {
     });
   });
 
-  /* REQ-DELIVERY-011: Account selectors, sender emails, and mailbox IDs are unique. */
+  /* REQ-DELIVERY-011: Account selectors and derived mailbox IDs are unique. */
   it.each([
     {
       name: "account name",
       duplicate: { ...account, email: "other@example.com" },
       message: "duplicate account name",
-    },
-    {
-      name: "sender email",
-      duplicate: { ...account, name: "other", email: " WORK@example.com " },
-      message: "duplicate account email",
     },
     {
       name: "derived mailbox ID",
@@ -96,6 +91,15 @@ describe("config/schema", () => {
 
     expect(parsed.success).toBe(false);
     if (!parsed.success) expect(parsed.error.message).toContain(message);
+  });
+
+  /* REQ-DELIVERY-057: Distinct vault account selectors may address the same provider mailbox. */
+  it("allows distinct account selectors with the same sender email", () => {
+    const parsed = configSchema.safeParse({
+      accounts: [account, { ...account, name: "other", email: " WORK@example.com " }],
+    });
+
+    expect(parsed.success).toBe(true);
   });
 
   /* REQ-DELIVERY-012: SMTP ports outside the TCP range fail at the config boundary. */
