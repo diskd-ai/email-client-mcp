@@ -2,6 +2,8 @@
 
 ## 2026-08-29
 
+- `end:comm/email-client-mcp/delivery`: normalize absent Drive-stored email strings at the delivery adapter so canonical Outbox payloads reach SMTP without weakening address, account, or lifecycle validation.
+- `end:comm/email-client-mcp/sync`: persist the connector account selector in mailbox metadata so reviewed messages can retain provider identity independently from their human-readable From address.
 - `end:comm/email-client-mcp/delivery`: validate custom delivery requests through the MCP SDK base request schema so standard JSON-RPC envelope fields are accepted while locator parameters remain strict.
 - `end:comm/email-client-mcp/delivery`: normalize Drive's offset database timestamps at the SDK adapter boundary so reconciliation can reload pending Outbox items and recover delivery after event-path interruptions.
 - `end:comm/email-client-mcp/config`: allow distinct vault account selectors to target the same provider mailbox address, preserving selector-owned delivery and From authorization without crash-looping valid multi-account runtime configs.
