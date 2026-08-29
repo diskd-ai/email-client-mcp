@@ -2,6 +2,7 @@
 
 ## 2026-08-29
 
+- `end:comm/email-client-mcp/delivery`: normalize Drive's offset database timestamps at the SDK adapter boundary so reconciliation can reload pending Outbox items and recover delivery after event-path interruptions.
 - `end:comm/email-client-mcp/config`: allow distinct vault account selectors to target the same provider mailbox address, preserving selector-owned delivery and From authorization without crash-looping valid multi-account runtime configs.
 - `end:comm/email-client-mcp/delivery`: keep credential selection bound to the explicit account selector when multiple configured connectors authorize the same From address.
 - `end:comm/email-client-mcp/delivery`: complete locator-only MCP delivery dispatch with a tool-free `deliver` entrypoint, Drive-backed attachment hydration, configured From authorization, byte-identical SMTP and IMAP Sent handling, and observable terminal outcomes while keeping NATS ownership in mcp-hub.

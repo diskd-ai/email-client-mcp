@@ -95,6 +95,21 @@ describe("delivery/infrastructure/outboxSdkAdapter", () => {
     });
   });
 
+  /* REQ-DELIVERY-049: Drive offset timestamps are normalized at the SDK adapter boundary. */
+  it("accepts PostgreSQL offset timestamps returned by Drive", () => {
+    const result = parseSdkOutboxItem("Get", {
+      ...availableItem,
+      createdAt: "2026-08-29 15:47:09.458317+00:00",
+      updatedAt: "2026-08-29 15:47:50.107800+00:00",
+    });
+
+    expect(result.tag).toBe("Ok");
+    if (result.tag === "Ok") {
+      expect(result.value.createdAt).toBe("2026-08-29T15:47:09.458317+00:00");
+      expect(result.value.updatedAt).toBe("2026-08-29T15:47:50.107800+00:00");
+    }
+  });
+
   /* REQ-DELIVERY-018: Pending pagination and cursor absence use explicit local variants. */
   it("maps pending pages and forwards an explicit cursor", async () => {
     const sdk = buildSdk();

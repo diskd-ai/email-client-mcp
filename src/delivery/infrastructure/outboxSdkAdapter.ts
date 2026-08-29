@@ -40,6 +40,16 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 const jsonObjectSchema: z.ZodType<JsonObject> = z.record(jsonValueSchema);
 
+const POSTGRES_OFFSET_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+const normalizeSdkDateTime = (value: unknown): unknown =>
+  typeof value === "string" && POSTGRES_OFFSET_TIMESTAMP.test(value)
+    ? value.replace(" ", "T")
+    : value;
+
+const sdkDateTimeSchema = z.preprocess(normalizeSdkDateTime, z.string().datetime({ offset: true }));
+
 const sdkOutboxItemSchema = z
   .object({
     externalId: z.string().min(1),
@@ -51,10 +61,10 @@ const sdkOutboxItemSchema = z
     revision: z.string().min(1),
     deliveryAttempts: z.number().int().min(0),
     leaseOwner: z.string().min(1).nullable(),
-    leaseExpiresAt: z.string().datetime({ offset: true }).nullable(),
+    leaseExpiresAt: sdkDateTimeSchema.nullable(),
     failureReason: z.string().min(1).nullable(),
-    createdAt: z.string().datetime({ offset: true }),
-    updatedAt: z.string().datetime({ offset: true }),
+    createdAt: sdkDateTimeSchema,
+    updatedAt: sdkDateTimeSchema,
   })
   .strict();
 
