@@ -43,10 +43,33 @@ describe("delivery/infrastructure/emailOutboxPayload", () => {
     });
   });
 
-  /* REQ-DELIVERY-030: The attachment-free contract rejects payloads that could silently drop files. */
-  it("rejects attachments", () => {
+  /* REQ-DELIVERY-030: The delivery contract validates non-empty canonical Drive attachment references. */
+  it("parses Drive-backed attachments", () => {
     const result = parseEmailOutboxPayload(
-      { ...payload, hasAttachments: true, attachments: [{ name: "contract.pdf" }] },
+      {
+        ...payload,
+        hasAttachments: true,
+        attachments: [
+          {
+            path: "/Projects/acme/contract.pdf",
+            filename: "contract.pdf",
+            contentType: "application/pdf",
+          },
+        ],
+      },
+      "work",
+    );
+
+    expect(result.tag).toBe("Ok");
+    if (result.tag === "Ok") {
+      expect(result.value.attachments[0].path).toBe("/Projects/acme/contract.pdf");
+    }
+  });
+
+  /* REQ-DELIVERY-045: Attachment presence and list cardinality cannot disagree at the provider boundary. */
+  it("rejects an empty attachment list when hasAttachments is true", () => {
+    const result = parseEmailOutboxPayload(
+      { ...payload, hasAttachments: true, attachments: [] },
       "work",
     );
 

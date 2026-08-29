@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import type { EmailOutboxPayload } from "@diskd-ai/sdk";
 import * as nodemailer from "nodemailer";
+import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import { z } from "zod";
 import { type Account, isOAuthAccount, type SmtpSettings } from "../../config/schema.js";
 import type { TransportOutcome } from "../domain/transportOutcome.js";
+import type { LoadedEmailAttachment } from "./driveAttachmentLoader.js";
 
 const CONNECTION_TIMEOUT_MS = 30_000;
 const GREETING_TIMEOUT_MS = 30_000;
@@ -37,12 +39,28 @@ export type SmtpConnectionOptions = {
 
 export type SmtpMessage = {
   readonly payload: EmailOutboxPayload;
+  readonly attachments: readonly LoadedEmailAttachment[];
   readonly fromAddress: string;
   readonly fromName: string;
 };
 
+export type SmtpSendResult =
+  | {
+      readonly kind: "Accepted";
+      readonly receipt: {
+        readonly messageId: string;
+        readonly accepted: readonly string[];
+        readonly rejected: readonly string[];
+        readonly response: string;
+      };
+      readonly rawMessage: Buffer;
+    }
+  | Exclude<TransportOutcome, { readonly kind: "Accepted" }>;
+
+type SmtpFailureOutcome = Exclude<TransportOutcome, { readonly kind: "Accepted" }>;
+
 export type SmtpSender = {
-  readonly send: (message: SmtpMessage) => Promise<TransportOutcome>;
+  readonly send: (message: SmtpMessage) => Promise<SmtpSendResult>;
   readonly close: () => void;
 };
 
@@ -82,7 +100,7 @@ const isPreSubmissionCommand = (command: string | undefined): boolean =>
   command === "API";
 
 /** Classify only failures proven to occur before SMTP acceptance as retryable. */
-export const classifySmtpFailure = (cause: unknown): TransportOutcome => {
+export const classifySmtpFailure = (cause: unknown): SmtpFailureOutcome => {
   const parsed = smtpErrorSchema.safeParse(cause);
   const fallback = cause instanceof Error ? cause.message : String(cause);
   if (!parsed.success) {
@@ -163,6 +181,35 @@ const normalizeSmtpAddresses = (values: readonly unknown[]): readonly string[] =
     return address === undefined ? [] : [address];
   });
 
+const recipientAddresses = (payload: EmailOutboxPayload): readonly string[] => [
+  ...payload.to.map((contact) => contact.address),
+  ...payload.cc.map((contact) => contact.address),
+  ...payload.bcc.map((contact) => contact.address),
+];
+
+/** Compose once so SMTP submission and the IMAP Sent copy share byte-identical RFC822 content. */
+export const composeRawMessage = async (message: SmtpMessage): Promise<Buffer> =>
+  new MailComposer({
+    messageId: toSmtpMessageId(message.payload.messageId),
+    from: { name: message.fromName, address: message.fromAddress },
+    to: [...message.payload.to],
+    cc: [...message.payload.cc],
+    bcc: [...message.payload.bcc],
+    subject: message.payload.subject,
+    text: message.payload.bodyText,
+    html: message.payload.bodyHtml || undefined,
+    inReplyTo: message.payload.inReplyTo ?? undefined,
+    attachments: message.attachments.map((attachment) => ({
+      filename: attachment.filename,
+      contentType: attachment.contentType,
+      content: attachment.content,
+    })),
+    disableFileAccess: true,
+    disableUrlAccess: true,
+  })
+    .compile()
+    .build();
+
 export const buildSmtpSender = (account: Account): SmtpSender => {
   if (account.smtp === undefined) {
     throw new Error(`SMTP settings missing for account: ${account.name}`);
@@ -171,22 +218,31 @@ export const buildSmtpSender = (account: Account): SmtpSender => {
 
   return {
     send: async (message) => {
+      let rawMessage: Buffer;
+      try {
+        rawMessage = await composeRawMessage(message);
+      } catch (cause) {
+        return {
+          kind: "RejectedBeforeAcceptance",
+          rejection: {
+            kind: "Permanent",
+            failure: {
+              reason: `Message composition failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+            },
+          },
+        };
+      }
       try {
         const info = await transport.sendMail({
-          messageId: toSmtpMessageId(message.payload.messageId),
-          from: { name: message.fromName, address: message.fromAddress },
-          to: [...message.payload.to],
-          cc: [...message.payload.cc],
-          bcc: [...message.payload.bcc],
-          subject: message.payload.subject,
-          text: message.payload.bodyText,
-          html: message.payload.bodyHtml || undefined,
-          inReplyTo: message.payload.inReplyTo ?? undefined,
-          disableFileAccess: true,
-          disableUrlAccess: true,
+          raw: rawMessage,
+          envelope: {
+            from: message.fromAddress,
+            to: [...recipientAddresses(message.payload)],
+          },
         });
         return {
           kind: "Accepted",
+          rawMessage,
           receipt: {
             messageId: info.messageId,
             accepted: normalizeSmtpAddresses(info.accepted),

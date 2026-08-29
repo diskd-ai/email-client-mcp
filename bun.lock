@@ -4,7 +4,7 @@
     "": {
       "name": "@diskd-ai/email-client-mcp",
       "dependencies": {
-        "@diskd-ai/sdk": "6.3.4",
+        "@diskd-ai/sdk": "6.3.5",
         "@modelcontextprotocol/sdk": "^1.26.0",
         "imapflow": "^1.2.9",
         "nodemailer": "9.0.6",
@@ -40,7 +40,7 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.4.7", "", { "os": "win32", "cpu": "x64" }, "sha512-qEpGjSkPC3qX4ycbMUthXvi9CkRq7kZpkqMY1OyhmYlYLnANnooDQ7hDerM8+0NJ+DZKVnsIc07h30XOpt7LtQ=="],
 
-    "@diskd-ai/sdk": ["@diskd-ai/sdk@6.3.4", "", { "dependencies": { "undici": "^7.21.0" }, "optionalDependencies": { "tiktoken": "^1.0.22" }, "peerDependencies": { "typeorm": "^0.3.28" }, "optionalPeers": ["typeorm"] }, "sha512-Yaz8aQLF8geyRs1fkUQztKeZgj62lNXehGEGcQDWVd7ahGaVhtGceMlJt1kyuvFtHPKEPKDUeiTI4Y5D75jCuA=="],
+    "@diskd-ai/sdk": ["@diskd-ai/sdk@6.3.5", "", { "dependencies": { "undici": "^7.21.0" }, "optionalDependencies": { "tiktoken": "^1.0.22" }, "peerDependencies": { "typeorm": "^0.3.28" }, "optionalPeers": ["typeorm"] }, "sha512-K6gKcgGE5oeYvxTs6EcVoJZC0TkexDBcTWysquCyWq4H0Vwi7JE75XFUQKhh18DqzE6gKpJN66CxqYrldtDsoA=="],
 
     "@esbuild/aix-ppc64": ["@esbuild/aix-ppc64@0.27.7", "", { "os": "aix", "cpu": "ppc64" }, "sha512-EKX3Qwmhz1eMdEJokhALr0YiD0lhQNwDqkPYyPhiSwKrh7/4KRjQc04sZ8db+5DVVnZ1LmbNDI1uAMPEUBnQPg=="],
 

@@ -5,6 +5,8 @@ import type {
 } from "../../src/delivery/application/outboxRepository.js";
 import { encodeDeliveryProgress } from "../../src/delivery/domain/deliveryProgress.js";
 import { buildDeliveryProcessor } from "../../src/delivery/infrastructure/deliveryProcessor.js";
+import type { DriveAttachmentLoader } from "../../src/delivery/infrastructure/driveAttachmentLoader.js";
+import type { SentFolderAppender } from "../../src/delivery/infrastructure/sentFolderAppender.js";
 import type { SmtpSender } from "../../src/delivery/infrastructure/smtpTransport.js";
 import { None, Ok, Some } from "../../src/domain/result.js";
 
@@ -13,7 +15,7 @@ const payload = {
   account: "work",
   threadId: null,
   inReplyTo: null,
-  from: { name: "Agent", address: "work" },
+  from: { name: "Agent", address: "agent@example.com" },
   to: [{ name: "Lead", address: "lead@example.com" }],
   cc: [],
   bcc: [],
@@ -97,7 +99,15 @@ const accountConfig = {
   },
 };
 
-const makeProcessor = (repository: OutboxRepository, sender: SmtpSender, calls: string[]) =>
+const makeProcessor = (
+  repository: OutboxRepository,
+  sender: SmtpSender,
+  calls: string[],
+  overrides: {
+    readonly attachmentLoader?: DriveAttachmentLoader;
+    readonly sentFolderAppender?: SentFolderAppender;
+  } = {},
+) =>
   buildDeliveryProcessor({
     repository,
     accounts: [{ config: accountConfig, sender }],
@@ -109,6 +119,15 @@ const makeProcessor = (repository: OutboxRepository, sender: SmtpSender, calls: 
     leaseOwner: "email-client-mcp-test",
     now: () => new Date("2026-08-29T12:00:30.000Z"),
     log: vi.fn(),
+    attachmentLoader: overrides.attachmentLoader ?? {
+      load: vi.fn(async () => Ok([])),
+    },
+    sentFolderAppender: overrides.sentFolderAppender ?? {
+      append: vi.fn(async () => {
+        calls.push("imap-append");
+        return Ok({ folder: "Sent", uidValidity: "42", uid: "101" });
+      }),
+    },
   });
 
 describe("delivery/infrastructure/deliveryProcessor", () => {
@@ -121,6 +140,7 @@ describe("delivery/infrastructure/deliveryProcessor", () => {
         calls.push("smtp");
         return {
           kind: "Accepted",
+          rawMessage: Buffer.from("RFC822 message"),
           receipt: {
             messageId: "<message@example.com>",
             accepted: ["lead@example.com"],
@@ -138,7 +158,14 @@ describe("delivery/infrastructure/deliveryProcessor", () => {
     });
 
     expect(result.kind).toBe("Ack");
-    expect(calls).toEqual(["rate", "claim", "progress:DeliveryStarted", "smtp", "terminal:Sent"]);
+    expect(calls).toEqual([
+      "rate",
+      "claim",
+      "progress:DeliveryStarted",
+      "smtp",
+      "imap-append",
+      "terminal:Sent",
+    ]);
   });
 
   /* REQ-DELIVERY-040: A persisted delivery-start marker after restart never re-enters SMTP. */
@@ -231,6 +258,157 @@ describe("delivery/infrastructure/deliveryProcessor", () => {
     expect(repository.writeTerminal).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: { kind: "Failed", reason: "FailedUnknown: response lost after DATA" },
+      }),
+    );
+  });
+
+  /* REQ-DELIVERY-054: Payload From must match the configured account identity before SMTP. */
+  it("terminalizes an unauthorized From identity without calling SMTP", async () => {
+    const calls: string[] = [];
+    const repository = makeRepository(
+      {
+        ...availableItem,
+        payload: {
+          ...payload,
+          from: { name: "Attacker", address: "attacker@example.com" },
+        },
+      },
+      calls,
+    );
+    const sender: SmtpSender = { send: vi.fn(), close: vi.fn() };
+
+    const result = await makeProcessor(repository, sender, calls).process({
+      kind: "Reconciliation",
+      externalId: "review-1",
+    });
+
+    expect(result.kind).toBe("Ack");
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(calls).toEqual(["claim", "terminal:Failed"]);
+    expect(repository.writeTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: expect.objectContaining({
+          kind: "Failed",
+          reason: expect.stringContaining("Invalid delivery identity"),
+        }),
+      }),
+    );
+  });
+
+  /* REQ-DELIVERY-055: Drive attachment bytes are loaded before the persisted SMTP-start marker. */
+  it("hydrates Drive attachments before starting SMTP delivery", async () => {
+    const calls: string[] = [];
+    const item: OutboxItem = {
+      ...availableItem,
+      payload: {
+        ...payload,
+        hasAttachments: true,
+        attachments: [
+          {
+            path: "/Projects/acme/contract.pdf",
+            filename: "contract.pdf",
+            contentType: "application/pdf",
+          },
+        ],
+      },
+    };
+    const repository = makeRepository(item, calls);
+    const attachmentLoader: DriveAttachmentLoader = {
+      load: vi.fn(async () => {
+        calls.push("attachments");
+        return Ok([
+          {
+            filename: "contract.pdf",
+            contentType: "application/pdf",
+            content: Buffer.from("pdf-bytes"),
+          },
+        ]);
+      }),
+    };
+    const sender: SmtpSender = {
+      send: vi.fn(async () => {
+        calls.push("smtp");
+        return {
+          kind: "Accepted",
+          rawMessage: Buffer.from("RFC822 message"),
+          receipt: {
+            messageId: "<message@example.com>",
+            accepted: ["lead@example.com"],
+            rejected: [],
+            response: "250 queued",
+          },
+        };
+      }),
+      close: vi.fn(),
+    };
+
+    await makeProcessor(repository, sender, calls, { attachmentLoader }).process({
+      kind: "Reconciliation",
+      externalId: "review-1",
+    });
+
+    expect(calls).toEqual([
+      "rate",
+      "claim",
+      "attachments",
+      "progress:DeliveryStarted",
+      "smtp",
+      "imap-append",
+      "terminal:Sent",
+    ]);
+    expect(sender.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [expect.objectContaining({ filename: "contract.pdf" })],
+      }),
+    );
+  });
+
+  /* REQ-DELIVERY-056: Sent-folder append failure is observable but never resubmits accepted SMTP. */
+  it("records Sent after an observable IMAP append failure", async () => {
+    const calls: string[] = [];
+    const repository = makeRepository(availableItem, calls);
+    const sender: SmtpSender = {
+      send: vi.fn(async () => {
+        calls.push("smtp");
+        return {
+          kind: "Accepted",
+          rawMessage: Buffer.from("RFC822 message"),
+          receipt: {
+            messageId: "<message@example.com>",
+            accepted: ["lead@example.com"],
+            rejected: [],
+            response: "250 queued",
+          },
+        };
+      }),
+      close: vi.fn(),
+    };
+    const sentFolderAppender: SentFolderAppender = {
+      append: vi.fn(async () => {
+        calls.push("imap-append");
+        return {
+          tag: "Err",
+          error: { kind: "SentFolderMissing", accountId: "work" },
+        };
+      }),
+    };
+
+    const result = await makeProcessor(repository, sender, calls, {
+      sentFolderAppender,
+    }).process({
+      kind: "Reconciliation",
+      externalId: "review-1",
+    });
+
+    expect(result.kind).toBe("Ack");
+    expect(repository.writeTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: expect.objectContaining({
+          kind: "Sent",
+          providerResponse: expect.objectContaining({
+            sentFolderAppend: expect.objectContaining({ status: "failed" }),
+          }),
+        }),
       }),
     );
   });

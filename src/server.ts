@@ -19,17 +19,27 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config/loader.js";
-import { buildDeliveryProcessor } from "./delivery/infrastructure/deliveryProcessor.js";
+import {
+  buildDeliveryProcessor,
+  type DeliveryProcessor,
+} from "./delivery/infrastructure/deliveryProcessor.js";
+import {
+  type ExchangeDeliveryProtocol,
+  registerExchangeDeliveryHandler,
+} from "./delivery/infrastructure/deliveryProtocol.js";
 import {
   buildDeliveryRuntime,
   type DeliveryRuntime,
 } from "./delivery/infrastructure/deliveryRuntime.js";
+import { buildDriveAttachmentLoader } from "./delivery/infrastructure/driveAttachmentLoader.js";
 import { buildOutboxRepository } from "./delivery/infrastructure/outboxSdkAdapter.js";
 import { buildPerAccountRateLimiter } from "./delivery/infrastructure/perAccountRateLimiter.js";
+import { buildSentFolderAppender } from "./delivery/infrastructure/sentFolderAppender.js";
 import { buildSmtpSender, type SmtpSender } from "./delivery/infrastructure/smtpTransport.js";
 import type { ImapError } from "./domain/errors.js";
 import { errorMessage } from "./domain/errors.js";
 import { Err, Ok, type Result } from "./domain/result.js";
+import { configureServerMode, parseSubcommand } from "./entrypointMode.js";
 import { buildPlatformEventNotifier } from "./events/platformEventNotifier.js";
 import {
   downloadPartByUid,
@@ -57,27 +67,23 @@ const log = (msg: string, extra?: Readonly<Record<string, unknown>>): void => {
   process.stderr.write(`[email-client-mcp] ${payload}\n`);
 };
 
-const parseSubcommand = (argv: readonly string[]): "stdio" | "unknown" => {
-  // npx will pass the bin name as argv[1]; the user-supplied subcommand
-  // is at argv[2] (or absent).
-  const sub = argv[2];
-  if (sub === undefined || sub === "stdio") return "stdio";
-  return "unknown";
-};
-
 const main = async (): Promise<void> => {
-  const sub = parseSubcommand(process.argv);
-  if (sub === "unknown") {
-    log("usage: email-client-mcp [stdio]");
+  const mode = parseSubcommand(process.argv);
+  if (mode === "unknown") {
+    log("usage: email-client-mcp [stdio|deliver]");
     process.exit(2);
   }
 
-  log("starting", { version: PACKAGE_VERSION });
+  log("starting", { version: PACKAGE_VERSION, mode });
 
   const configPath = process.env.EMAIL_CLIENT_MCP_CONFIG;
   const cfg = await loadConfig(configPath);
   if (cfg.tag === "Err") {
     log("config error", { error: errorMessage(cfg.error) });
+    process.exit(1);
+  }
+  if (mode === "deliver" && !cfg.value.deliver.enabled) {
+    log("config error", { error: "deliver mode requires [deliver].enabled = true" });
     process.exit(1);
   }
 
@@ -208,6 +214,7 @@ const main = async (): Promise<void> => {
   const watcher = buildWatcher(syncDeps, cfg.value.accounts, cfg.value.watcher, log);
   const smtpSenders: SmtpSender[] = [];
   let deliveryRuntime: DeliveryRuntime | undefined;
+  let deliveryProcessor: DeliveryProcessor | undefined;
   let requestShutdown: (signal: string, exitCode: number) => void = (signal, exitCode) => {
     log("shutdown requested before runtime initialization", { signal, exitCode });
     process.exitCode = exitCode;
@@ -219,33 +226,49 @@ const main = async (): Promise<void> => {
       return { config: account, sender };
     });
     const repository = buildOutboxRepository(diskd.value.messagesStore);
-    const processor = buildDeliveryProcessor({
+    deliveryProcessor = buildDeliveryProcessor({
       repository,
       accounts: deliveryAccounts,
       rateLimiter: buildPerAccountRateLimiter(cfg.value.deliver.rate_limit_per_account_per_minute),
       leaseOwner: `email-client-mcp-${randomUUID()}`,
       now: () => new Date(),
       log,
+      attachmentLoader: buildDriveAttachmentLoader(diskd.value.drive),
+      sentFolderAppender: buildSentFolderAppender(pool),
     });
     deliveryRuntime = buildDeliveryRuntime({
       repository,
-      processor,
+      processor: deliveryProcessor,
       log,
     });
   }
 
-  registerTools(server, {
-    accounts: cfg.value.accounts,
-    imapPool: pool,
-    watcher,
-    bodyHydration: bodyHydrationDeps,
-    attachmentHydration: attachmentHydrationDeps,
-    messageMirror: driveStore,
-  });
+  const registerModelTools = (): void =>
+    registerTools(server, {
+      accounts: cfg.value.accounts,
+      imapPool: pool,
+      watcher,
+      bodyHydration: bodyHydrationDeps,
+      attachmentHydration: attachmentHydrationDeps,
+      messageMirror: driveStore,
+    });
+
+  if (deliveryProcessor === undefined) {
+    if (mode === "stdio") registerModelTools();
+  } else {
+    configureServerMode(mode, {
+      registerDelivery: () =>
+        registerExchangeDeliveryHandler(
+          server.server as unknown as ExchangeDeliveryProtocol,
+          deliveryProcessor,
+        ),
+      registerTools: registerModelTools,
+    });
+  }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log("mcp ready", { accounts: cfg.value.accounts.length });
+  log("mcp ready", { accounts: cfg.value.accounts.length, mode });
 
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = async (signal: string, exitCode: number): Promise<void> => {
@@ -300,10 +323,12 @@ const main = async (): Promise<void> => {
   // Start watcher after MCP transport is ready. The interval fires
   // immediately on the first tick (see watcher.start), then on every
   // clamped interval thereafter.
-  if (cfg.value.watcher.enabled) {
+  if (mode === "stdio" && cfg.value.watcher.enabled) {
     watcher.start();
   } else {
-    log("watcher.disabled-by-config");
+    log("watcher.disabled", {
+      reason: mode === "deliver" ? "deliver-mode" : "config",
+    });
   }
 };
 

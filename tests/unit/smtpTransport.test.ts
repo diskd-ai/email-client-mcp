@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildSmtpConnectionOptions,
   classifySmtpFailure,
+  composeRawMessage,
   toSmtpMessageId,
 } from "../../src/delivery/infrastructure/smtpTransport.js";
 
@@ -112,5 +113,48 @@ describe("delivery/infrastructure/smtpTransport", () => {
   it("derives a stable RFC message id", () => {
     expect(toSmtpMessageId("review-1")).toBe(toSmtpMessageId("review-1"));
     expect(toSmtpMessageId("review-1")).toMatch(/^<[a-f0-9]{64}@email-client-mcp\.invalid>$/);
+  });
+
+  /* REQ-DELIVERY-053: SMTP and IMAP reuse one RFC822 message containing hydrated attachments. */
+  it("composes one RFC822 message with the canonical Message-ID and attachment bytes", async () => {
+    const raw = await composeRawMessage({
+      payload: {
+        messageId: "review-1",
+        account: "work",
+        threadId: null,
+        inReplyTo: null,
+        from: { name: "Agent", address: "agent@example.com" },
+        to: [{ name: "Lead", address: "lead@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "Viewing request",
+        bodyText: "Hello",
+        bodyHtml: "",
+        hasAttachments: true,
+        attachments: [
+          {
+            path: "/Projects/acme/contract.pdf",
+            filename: "contract.pdf",
+            contentType: "application/pdf",
+          },
+        ],
+      },
+      attachments: [
+        {
+          filename: "contract.pdf",
+          contentType: "application/pdf",
+          content: Buffer.from("pdf-bytes"),
+        },
+      ],
+      fromAddress: "agent@example.com",
+      fromName: "Agent",
+    });
+    const message = raw.toString("utf8");
+    const unfoldedMessage = message.replace(/\r\n[ \t]+/g, " ");
+
+    expect(unfoldedMessage).toContain(`Message-ID: ${toSmtpMessageId("review-1")}`);
+    expect(message).toContain("Content-Type: application/pdf");
+    expect(message).toContain("filename=contract.pdf");
+    expect(message).toContain("cGRmLWJ5dGVz");
   });
 });

@@ -23,6 +23,7 @@ import { Err, Ok, type Result } from "../domain/result.js";
 
 export type DiskdRuntime = {
   readonly workspaceId: string;
+  readonly drive: ReturnType<typeof diskd.os.drive>;
   readonly messagesStore: ReturnType<typeof diskd.os.messagesStore>;
 };
 
@@ -74,6 +75,7 @@ export const buildDiskd = (
   }
 
   const auth = diskd.auth.apiKey({ workspaceId });
+  const drive = diskd.os.drive({ version: "v1", auth });
   const messagesStore = diskd.os.messagesStore({ auth });
-  return Ok({ workspaceId, messagesStore });
+  return Ok({ workspaceId, drive, messagesStore });
 };
