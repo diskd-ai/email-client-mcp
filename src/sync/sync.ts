@@ -825,6 +825,7 @@ export const runSyncOnce = async (
   const displayName = account.full_name ?? account.email;
 
   const ens = await deps.drive.ensureMailbox(mailboxId, displayName, {
+    connectorAccountId: account.name,
     email: account.email,
   });
   if (ens.tag === "Err") {

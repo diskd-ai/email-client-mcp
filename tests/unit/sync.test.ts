@@ -371,8 +371,8 @@ const mkMsgWithAttachment = (uid: number, partId = "2", sizeBytes = 12): Fetched
 });
 
 describe("sync/runSyncOnce", () => {
-  it("persists the real email separately from the human account label", async () => {
-    /* REQ-3066-004: IMAP sync must preserve explicit email metadata without parsing displayName. */
+  it("persists connector identity and email separately from the human account label", async () => {
+    /* REQ-DELIVERY-053: IMAP sync must preserve connector identity and explicit email metadata without parsing storage locators or displayName. */
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const imap: FakeImapState = { folders: [], messagesByFolder: new Map() };
 
@@ -381,7 +381,10 @@ describe("sync/runSyncOnce", () => {
     expect(report.error).toBeNull();
     expect(drive.mailboxes.get("exchange-work")).toEqual({
       displayName: "Work",
-      metadata: { email: "work@example.com" },
+      metadata: {
+        connectorAccountId: "work",
+        email: "work@example.com",
+      },
     });
   });
 
