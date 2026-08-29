@@ -63,16 +63,16 @@ describe("delivery/domain/identity", () => {
     if (result.tag === "Err") expect(result.error.kind).toBe(errorKind);
   });
 
-  /* REQ-DELIVERY-009: One From address cannot silently select multiple accounts. */
-  it("rejects a sender address shared by accounts", () => {
+  /* REQ-DELIVERY-009: The explicit account selector owns credential choice when sender addresses are shared. */
+  it("resolves a sender address shared by accounts through the explicit selector", () => {
     const configured = [
       ...accounts,
       { accountId: "shared", allowedFromAddresses: ["WORK@example.com"] },
     ];
 
     expect(resolveDeliveryIdentity(configured, "work", "work@example.com")).toEqual({
-      tag: "Err",
-      error: { kind: "AmbiguousFromIdentity", fromAddress: "work@example.com" },
+      tag: "Ok",
+      value: { accountId: "work", fromAddress: "work@example.com" },
     });
   });
 });

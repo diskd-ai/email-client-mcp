@@ -18,8 +18,7 @@ export type DeliveryIdentityError =
       readonly kind: "UnauthorizedFromIdentity";
       readonly accountId: string;
       readonly fromAddress: string;
-    }
-  | { readonly kind: "AmbiguousFromIdentity"; readonly fromAddress: string };
+    };
 
 export const normalizeEmailAddress = (address: string): string => address.trim().toLowerCase();
 
@@ -48,13 +47,6 @@ export const resolveDeliveryIdentity = (
       accountId,
       fromAddress: normalizedFromAddress,
     });
-  }
-
-  const addressOwners = accounts.filter((account) =>
-    hasFromAddress(account, normalizedFromAddress),
-  );
-  if (addressOwners.length > 1) {
-    return Err({ kind: "AmbiguousFromIdentity", fromAddress: normalizedFromAddress });
   }
 
   return Ok({ accountId, fromAddress: normalizedFromAddress });

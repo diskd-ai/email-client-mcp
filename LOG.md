@@ -3,6 +3,7 @@
 ## 2026-08-29
 
 - `end:comm/email-client-mcp/config`: allow distinct vault account selectors to target the same provider mailbox address, preserving selector-owned delivery and From authorization without crash-looping valid multi-account runtime configs.
+- `end:comm/email-client-mcp/delivery`: keep credential selection bound to the explicit account selector when multiple configured connectors authorize the same From address.
 - `end:comm/email-client-mcp/delivery`: complete locator-only MCP delivery dispatch with a tool-free `deliver` entrypoint, Drive-backed attachment hydration, configured From authorization, byte-identical SMTP and IMAP Sent handling, and observable terminal outcomes while keeping NATS ownership in mcp-hub.
 - `end:comm/email-client-mcp/delivery`: deliver approved Exchange Outbox email through bounded Drive reconciliation and configured SMTP without NATS access in the dynamic MCP namespace, preserving the pre-send marker that makes ambiguous provider outcomes terminal `FailedUnknown`.
 - `end:comm/email-client-mcp/sync`: emit locator-only `exchange.inbox.created` notifications through the MCP protocol so trusted mcp-hub infrastructure owns NATS publication and app-service can re-read canonical Drive state.
