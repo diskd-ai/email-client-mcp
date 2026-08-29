@@ -18,6 +18,9 @@ export const configureServerMode = (
   mode: Exclude<ServerMode, "unknown">,
   registrations: ServerModeRegistrations,
 ): void => {
-  registrations.registerDelivery();
-  if (mode === "stdio") registrations.registerTools();
+  if (mode === "deliver") {
+    registrations.registerDelivery();
+    return;
+  }
+  registrations.registerTools();
 };

@@ -17,4 +17,15 @@ describe("entrypoint mode", () => {
     expect(registerDelivery).toHaveBeenCalledOnce();
     expect(registerTools).not.toHaveBeenCalled();
   });
+
+  /* REQ-DELIVERY-048: Stdio mode cannot register the SMTP delivery protocol. */
+  it("keeps stdio mode free of the delivery protocol", () => {
+    const registerDelivery = vi.fn();
+    const registerTools = vi.fn();
+
+    configureServerMode("stdio", { registerDelivery, registerTools });
+
+    expect(registerDelivery).not.toHaveBeenCalled();
+    expect(registerTools).toHaveBeenCalledOnce();
+  });
 });

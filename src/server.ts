@@ -219,7 +219,7 @@ const main = async (): Promise<void> => {
     log("shutdown requested before runtime initialization", { signal, exitCode });
     process.exitCode = exitCode;
   };
-  if (cfg.value.deliver.enabled) {
+  if (mode === "deliver" && cfg.value.deliver.enabled) {
     const deliveryAccounts = cfg.value.accounts.map((account) => {
       const sender = buildSmtpSender(account);
       smtpSenders.push(sender);
@@ -253,18 +253,18 @@ const main = async (): Promise<void> => {
       messageMirror: driveStore,
     });
 
-  if (deliveryProcessor === undefined) {
-    if (mode === "stdio") registerModelTools();
-  } else {
-    configureServerMode(mode, {
-      registerDelivery: () =>
-        registerExchangeDeliveryHandler(
-          server.server as unknown as ExchangeDeliveryProtocol,
-          deliveryProcessor,
-        ),
-      registerTools: registerModelTools,
-    });
-  }
+  configureServerMode(mode, {
+    registerDelivery: () => {
+      if (deliveryProcessor === undefined) {
+        throw new Error("deliver mode requires an initialized delivery processor");
+      }
+      registerExchangeDeliveryHandler(
+        server.server as unknown as ExchangeDeliveryProtocol,
+        deliveryProcessor,
+      );
+    },
+    registerTools: registerModelTools,
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -317,7 +317,7 @@ const main = async (): Promise<void> => {
   if (deliveryRuntime !== undefined) {
     await deliveryRuntime.start();
   } else {
-    log("delivery.disabled-by-config");
+    log("delivery.disabled-for-mode", { mode });
   }
 
   // Start watcher after MCP transport is ready. The interval fires
