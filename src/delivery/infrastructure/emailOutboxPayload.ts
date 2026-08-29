@@ -1,14 +1,19 @@
-import type { EmailOutboxAttachment, EmailOutboxContact, EmailOutboxPayload } from "@diskd-ai/sdk";
+import type { EmailOutboxAttachment, EmailOutboxPayload } from "@diskd-ai/sdk";
 import { z } from "zod";
 import { Err, Ok, type Result } from "../../domain/result.js";
 
-const senderContactSchema: z.ZodType<EmailOutboxContact> = z.object({
-  name: z.string(),
+const stringFromStoredAbsence = z
+  .string()
+  .nullable()
+  .transform((value) => value ?? "");
+
+const senderContactSchema = z.object({
+  name: stringFromStoredAbsence,
   address: z.string().min(1),
 });
 
-const recipientContactSchema: z.ZodType<EmailOutboxContact> = z.object({
-  name: z.string(),
+const recipientContactSchema = z.object({
+  name: stringFromStoredAbsence,
   address: z.string().email(),
 });
 
@@ -29,9 +34,9 @@ const emailOutboxPayloadFields = {
   to: z.array(recipientContactSchema).min(1),
   cc: z.array(recipientContactSchema),
   bcc: z.array(recipientContactSchema),
-  subject: z.string(),
-  bodyText: z.string(),
-  bodyHtml: z.string(),
+  subject: stringFromStoredAbsence,
+  bodyText: stringFromStoredAbsence,
+  bodyHtml: stringFromStoredAbsence,
 };
 
 const emailOutboxPayloadSchema = z.discriminatedUnion("hasAttachments", [

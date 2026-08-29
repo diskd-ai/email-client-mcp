@@ -30,6 +30,24 @@ describe("delivery/infrastructure/emailOutboxPayload", () => {
     }
   });
 
+  /* REQ-DELIVERY-054: The delivery boundary restores optional empty strings normalized to null by Drive storage. */
+  it("normalizes persisted null display names and empty body variants", () => {
+    const result = parseEmailOutboxPayload(
+      {
+        ...payload,
+        to: [{ name: null, address: "lead@example.com" }],
+        bodyHtml: null,
+      },
+      "work",
+    );
+
+    expect(result.tag).toBe("Ok");
+    if (result.tag === "Ok") {
+      expect(result.value.to).toEqual([{ name: "", address: "lead@example.com" }]);
+      expect(result.value.bodyHtml).toBe("");
+    }
+  });
+
   /* REQ-DELIVERY-029: Stored account identity and payload account identity must agree. */
   it("rejects an account mismatch", () => {
     const result = parseEmailOutboxPayload(payload, "personal");
