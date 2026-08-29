@@ -1,5 +1,13 @@
 # LOG
 
+## 2026-08-29
+
+- `end:comm/email-client-mcp/delivery`: deliver approved Exchange Outbox email through workspace-scoped JetStream and configured SMTP, persisting a pre-send marker before provider I/O so restarts and ambiguous responses become terminal `FailedUnknown` instead of automatic duplicate sends.
+
+## 2026-08-28
+
+- `end:comm/email-client-mcp/delivery`: establish the pure outbound delivery lifecycle, retry-safety decisions, sender identity authorization, and optional per-account SMTP configuration so later Exchange integration cannot retry ambiguous submissions or conflate connector identity with the From address.
+
 ## 2026-08-10
 
 - `end:comm/email-client-mcp/sync`: persist ImapFlow's provider hierarchy delimiter with every folder sync checkpoint so downstream Inbox queries can distinguish real descendants from same-prefix sibling folders (Redmine 2910).

@@ -15,9 +15,18 @@
  * Logs go to stderr only (stdout is reserved for MCP JSON-RPC).
  */
 
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config/loader.js";
+import { buildDeliveryProcessor } from "./delivery/infrastructure/deliveryProcessor.js";
+import {
+  buildDeliveryRuntime,
+  type DeliveryRuntime,
+} from "./delivery/infrastructure/deliveryRuntime.js";
+import { buildOutboxRepository } from "./delivery/infrastructure/outboxSdkAdapter.js";
+import { buildPerAccountRateLimiter } from "./delivery/infrastructure/perAccountRateLimiter.js";
+import { buildSmtpSender, type SmtpSender } from "./delivery/infrastructure/smtpTransport.js";
 import type { ImapError } from "./domain/errors.js";
 import { errorMessage } from "./domain/errors.js";
 import { Err, Ok, type Result } from "./domain/result.js";
@@ -217,6 +226,41 @@ const main = async (): Promise<void> => {
   };
 
   const watcher = buildWatcher(syncDeps, cfg.value.accounts, cfg.value.watcher, log);
+  const smtpSenders: SmtpSender[] = [];
+  let deliveryRuntime: DeliveryRuntime | undefined;
+  let requestShutdown: (signal: string, exitCode: number) => void = (signal, exitCode) => {
+    log("shutdown requested before runtime initialization", { signal, exitCode });
+    process.exitCode = exitCode;
+  };
+  if (cfg.value.deliver.enabled) {
+    const deliveryAccounts = cfg.value.accounts.map((account) => {
+      const sender = buildSmtpSender(account);
+      smtpSenders.push(sender);
+      return { config: account, sender };
+    });
+    const repository = buildOutboxRepository(diskd.value.messagesStore);
+    const processor = buildDeliveryProcessor({
+      repository,
+      accounts: deliveryAccounts,
+      rateLimiter: buildPerAccountRateLimiter(cfg.value.deliver.rate_limit_per_account_per_minute),
+      leaseOwner: `email-client-mcp-${randomUUID()}`,
+      now: () => new Date(),
+      log,
+    });
+    deliveryRuntime = buildDeliveryRuntime({
+      natsUrl: cfg.value.deliver.nats_url,
+      workspaceId: diskd.value.workspaceId,
+      repository,
+      processor,
+      log,
+      onFatal: (cause) => {
+        log("delivery fatal", {
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
+        requestShutdown("delivery-fatal", 1);
+      },
+    });
+  }
 
   const server = new McpServer({
     name: "email-client-mcp",
@@ -236,17 +280,16 @@ const main = async (): Promise<void> => {
   await server.connect(transport);
   log("mcp ready", { accounts: cfg.value.accounts.length });
 
-  // Start watcher after MCP transport is ready. The interval fires
-  // immediately on the first tick (see watcher.start), then on every
-  // clamped interval thereafter.
-  if (cfg.value.watcher.enabled) {
-    watcher.start();
-  } else {
-    log("watcher.disabled-by-config");
-  }
-
-  const shutdown = async (signal: string): Promise<void> => {
-    log("shutdown", { signal });
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = async (signal: string, exitCode: number): Promise<void> => {
+    log("shutdown", { signal, exitCode });
+    if (deliveryRuntime !== undefined) {
+      try {
+        await deliveryRuntime.stop();
+      } catch (e) {
+        log("delivery stop error", { error: String(e) });
+      }
+    }
     try {
       await watcher.stop();
     } catch (e) {
@@ -257,15 +300,44 @@ const main = async (): Promise<void> => {
     } catch (e) {
       log("pool close error", { error: String(e) });
     }
+    for (const sender of smtpSenders) {
+      try {
+        sender.close();
+      } catch (e) {
+        log("smtp close error", { error: String(e) });
+      }
+    }
     try {
       await server.close();
     } catch (e) {
       log("server close error", { error: String(e) });
     }
-    process.exit(0);
+    process.exit(exitCode);
   };
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  requestShutdown = (signal, exitCode) => {
+    if (shutdownPromise !== undefined) return;
+    shutdownPromise = shutdown(signal, exitCode).catch((cause) => {
+      log("shutdown failed", { error: cause instanceof Error ? cause.message : String(cause) });
+      process.exit(1);
+    });
+  };
+  process.on("SIGINT", () => requestShutdown("SIGINT", 0));
+  process.on("SIGTERM", () => requestShutdown("SIGTERM", 0));
+
+  if (deliveryRuntime !== undefined) {
+    await deliveryRuntime.start();
+  } else {
+    log("delivery.disabled-by-config");
+  }
+
+  // Start watcher after MCP transport is ready. The interval fires
+  // immediately on the first tick (see watcher.start), then on every
+  // clamped interval thereafter.
+  if (cfg.value.watcher.enabled) {
+    watcher.start();
+  } else {
+    log("watcher.disabled-by-config");
+  }
 };
 
 main().catch((err) => {

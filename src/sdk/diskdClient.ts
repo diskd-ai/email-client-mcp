@@ -10,7 +10,7 @@
  *   APIS_BASE_URL := env APIS_BASE_URL
  *                 | TOML [sdk].base_url
  *
- * SDK constraint (5.1.x): `APIS_API_KEY` and `APIS_BASE_URL` are read
+ * SDK constraint: `APIS_API_KEY` and `APIS_BASE_URL` are read
  * from `process.env` only -- there is no constructor param. We mirror
  * TOML values into env via `ensureEnv` (only when env is empty) so cluster
  * env always wins over per-server TOML.

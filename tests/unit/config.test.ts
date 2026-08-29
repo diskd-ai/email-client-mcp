@@ -9,14 +9,14 @@ const account = {
 };
 
 describe("config/schema", () => {
-  /* REQUIREMENT end:comm/email-client-mcp/config -- default watcher interval avoids per-minute idle IMAP scans */
+  /* REQ-CONFIG-001: Default watcher interval avoids per-minute idle IMAP scans. */
   it("defaults watcher interval to 5 minutes", () => {
     const parsed = configSchema.parse({ accounts: [account] });
 
     expect(parsed.watcher.interval_ms).toBe(300_000);
   });
 
-  /* REQUIREMENT end:comm/email-client-mcp/config -- watcher body hydration has safe eager defaults */
+  /* REQ-CONFIG-002: Watcher body hydration has safe eager defaults. */
   it("defaults watcher body hydration settings", () => {
     const parsed = configSchema.parse({ accounts: [account] });
 
@@ -27,7 +27,7 @@ describe("config/schema", () => {
     });
   });
 
-  /* REQUIREMENT end:comm/email-client-mcp/config -- watcher recent-first sync has bounded safe defaults */
+  /* REQ-CONFIG-003: Watcher recent-first sync has bounded safe defaults. */
   it("defaults watcher recent-first sync settings", () => {
     const parsed = configSchema.parse({ accounts: [account] });
 
@@ -38,6 +38,7 @@ describe("config/schema", () => {
     });
   });
 
+  /* REQ-CONFIG-004: Body hydration can be explicitly disabled. */
   it("allows disabling eager body hydration", () => {
     const parsed = configSchema.parse({
       accounts: [account],
@@ -51,5 +52,116 @@ describe("config/schema", () => {
       max_messages_per_tick: 3,
       skip_all_mail: false,
     });
+  });
+
+  /* REQ-DELIVERY-010: SMTP settings are optional and TLS defaults to enabled. */
+  it("parses per-account SMTP settings", () => {
+    const parsed = configSchema.parse({
+      accounts: [
+        {
+          ...account,
+          smtp: { host: "smtp.example.com", port: 465 },
+        },
+      ],
+    });
+
+    expect(parsed.accounts[0]?.smtp).toEqual({
+      host: "smtp.example.com",
+      port: 465,
+      tls: true,
+      starttls: false,
+      verify_ssl: true,
+    });
+  });
+
+  /* REQ-DELIVERY-011: Account selectors, sender emails, and mailbox IDs are unique. */
+  it.each([
+    {
+      name: "account name",
+      duplicate: { ...account, email: "other@example.com" },
+      message: "duplicate account name",
+    },
+    {
+      name: "sender email",
+      duplicate: { ...account, name: "other", email: " WORK@example.com " },
+      message: "duplicate account email",
+    },
+    {
+      name: "derived mailbox ID",
+      duplicate: { ...account, name: "work!", email: "other@example.com" },
+      message: "duplicate mailbox id",
+    },
+  ])("rejects a duplicate $name", ({ duplicate, message }) => {
+    const parsed = configSchema.safeParse({ accounts: [account, duplicate] });
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) expect(parsed.error.message).toContain(message);
+  });
+
+  /* REQ-DELIVERY-012: SMTP ports outside the TCP range fail at the config boundary. */
+  it("rejects invalid SMTP settings", () => {
+    const parsed = configSchema.safeParse({
+      accounts: [{ ...account, smtp: { host: "smtp.example.com", port: 0 } }],
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  /* REQ-DELIVERY-016: Delivery configuration must carry one explicit NATS endpoint and per-account rate limit. */
+  it("parses enabled delivery settings", () => {
+    const parsed = configSchema.parse({
+      accounts: [
+        {
+          ...account,
+          smtp: {
+            host: "smtp.example.com",
+            port: 587,
+            tls: false,
+            starttls: true,
+            verify_ssl: true,
+          },
+        },
+      ],
+      deliver: {
+        enabled: true,
+        nats_url: "nats://common-nats:4222",
+        rate_limit_per_account_per_minute: 12,
+      },
+    });
+
+    expect(parsed.deliver).toEqual({
+      enabled: true,
+      nats_url: "nats://common-nats:4222",
+      rate_limit_per_account_per_minute: 12,
+    });
+    expect(parsed.accounts[0]?.smtp).toEqual({
+      host: "smtp.example.com",
+      port: 587,
+      tls: false,
+      starttls: true,
+      verify_ssl: true,
+    });
+  });
+
+  /* REQ-DELIVERY-017: Inbound-only configurations remain explicit and do not start delivery. */
+  it("defaults delivery to disabled", () => {
+    const parsed = configSchema.parse({ accounts: [account] });
+
+    expect(parsed.deliver).toEqual({ enabled: false });
+  });
+
+  /* REQ-DELIVERY-018: Every account must expose SMTP when delivery is enabled. */
+  it("rejects enabled delivery when an account lacks SMTP", () => {
+    const parsed = configSchema.safeParse({
+      accounts: [account],
+      deliver: {
+        enabled: true,
+        nats_url: "nats://common-nats:4222",
+        rate_limit_per_account_per_minute: 10,
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) expect(parsed.error.message).toContain("SMTP settings are required");
   });
 });
