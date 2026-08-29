@@ -2,7 +2,8 @@
 
 ## 2026-08-29
 
-- `end:comm/email-client-mcp/delivery`: deliver approved Exchange Outbox email through workspace-scoped JetStream and configured SMTP, persisting a pre-send marker before provider I/O so restarts and ambiguous responses become terminal `FailedUnknown` instead of automatic duplicate sends.
+- `end:comm/email-client-mcp/delivery`: deliver approved Exchange Outbox email through bounded Drive reconciliation and configured SMTP without NATS access in the dynamic MCP namespace, preserving the pre-send marker that makes ambiguous provider outcomes terminal `FailedUnknown`.
+- `end:comm/email-client-mcp/sync`: emit locator-only `exchange.inbox.created` notifications through the MCP protocol so trusted mcp-hub infrastructure owns NATS publication and app-service can re-read canonical Drive state.
 
 ## 2026-08-28
 

@@ -30,6 +30,7 @@ import { buildSmtpSender, type SmtpSender } from "./delivery/infrastructure/smtp
 import type { ImapError } from "./domain/errors.js";
 import { errorMessage } from "./domain/errors.js";
 import { Err, Ok, type Result } from "./domain/result.js";
+import { buildPlatformEventNotifier } from "./events/platformEventNotifier.js";
 import {
   downloadPartByUid,
   fetchDisplayBodyByUid,
@@ -88,40 +89,19 @@ const main = async (): Promise<void> => {
   log("sdk ready", { workspaceId: diskd.value.workspaceId });
   const driveStore = buildDriveStore(diskd.value.messagesStore);
 
+  const server = new McpServer({
+    name: "email-client-mcp",
+    version: PACKAGE_VERSION,
+  });
+  const platformEvents = buildPlatformEventNotifier(server, diskd.value.workspaceId);
+
   const pool = buildImapPool(cfg.value.accounts, {
     onEvent: (event) => log("imap.pool-event", event),
   });
 
-  const signalEndpoint = process.env.EMAIL_CLIENT_MCP_SIGNAL_ENDPOINT;
-  const signalApiKey = process.env.EMAIL_CLIENT_MCP_SIGNAL_API_KEY;
-  if (signalEndpoint) {
-    log("signal notifier configured", {
-      endpoint: signalEndpoint,
-      hasApiKey: Boolean(signalApiKey),
-    });
-  } else {
-    log("signal notifier disabled", { reason: "EMAIL_CLIENT_MCP_SIGNAL_ENDPOINT is not set" });
-  }
-  const notifier: SyncDeps["notifier"] = signalEndpoint
-    ? {
-        notifyEmailPersisted: async (event) => {
-          const response = await fetch(signalEndpoint, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(signalApiKey ? { "X-Api-Key": signalApiKey } : {}),
-            },
-            body: JSON.stringify({ workspaceId: diskd.value.workspaceId, ...event }),
-          });
-          const responseText = await response.text();
-          if (!response.ok) {
-            throw new Error(
-              `signal notify failed (${response.status}): ${responseText.slice(0, 500)}`,
-            );
-          }
-        },
-      }
-    : undefined;
+  const notifier: SyncDeps["notifier"] = {
+    notifyEmailPersisted: platformEvents.notifyExchangeInboxCreated,
+  };
 
   const syncDeps: SyncDeps = {
     drive: driveStore as unknown as SyncDeps["drive"],
@@ -248,24 +228,11 @@ const main = async (): Promise<void> => {
       log,
     });
     deliveryRuntime = buildDeliveryRuntime({
-      natsUrl: cfg.value.deliver.nats_url,
-      workspaceId: diskd.value.workspaceId,
       repository,
       processor,
       log,
-      onFatal: (cause) => {
-        log("delivery fatal", {
-          error: cause instanceof Error ? cause.message : String(cause),
-        });
-        requestShutdown("delivery-fatal", 1);
-      },
     });
   }
-
-  const server = new McpServer({
-    name: "email-client-mcp",
-    version: PACKAGE_VERSION,
-  });
 
   registerTools(server, {
     accounts: cfg.value.accounts,

@@ -107,7 +107,7 @@ describe("config/schema", () => {
     expect(parsed.success).toBe(false);
   });
 
-  /* REQ-DELIVERY-016: Delivery configuration must carry one explicit NATS endpoint and per-account rate limit. */
+  /* REQ-DELIVERY-016: Delivery configuration carries only the account rate limit; provider pods do not receive NATS access. */
   it("parses enabled delivery settings", () => {
     const parsed = configSchema.parse({
       accounts: [
@@ -124,14 +124,12 @@ describe("config/schema", () => {
       ],
       deliver: {
         enabled: true,
-        nats_url: "nats://common-nats:4222",
         rate_limit_per_account_per_minute: 12,
       },
     });
 
     expect(parsed.deliver).toEqual({
       enabled: true,
-      nats_url: "nats://common-nats:4222",
       rate_limit_per_account_per_minute: 12,
     });
     expect(parsed.accounts[0]?.smtp).toEqual({
@@ -156,7 +154,6 @@ describe("config/schema", () => {
       accounts: [account],
       deliver: {
         enabled: true,
-        nats_url: "nats://common-nats:4222",
         rate_limit_per_account_per_minute: 10,
       },
     });

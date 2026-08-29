@@ -37,7 +37,6 @@
     "@diskd-ai/sdk": "6.3.4",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "imapflow": "^1.2.9",
-    "nats": "2.29.3",
     "nodemailer": "9.0.6",
     "smol-toml": "^1.6.0",
     "zod": "^3.23.8"

@@ -625,8 +625,8 @@ const syncFolder = async (
               ...event,
               error: cause instanceof Error ? cause.message : String(cause),
             });
-            // Best-effort post-checkpoint notification. app-service publishes
-            // deterministic event ids, so duplicate/replayed notifications are safe.
+            // Best-effort post-checkpoint MCP notification. MCP Hub publishes
+            // the deterministic locator event to NATS; duplicate notifications are safe.
           }
         }
       }

@@ -107,7 +107,6 @@ const deliverSchema = z.discriminatedUnion("enabled", [
   z.object({ enabled: z.literal(false) }),
   z.object({
     enabled: z.literal(true),
-    nats_url: z.string().regex(/^nats:\/\/\S+$/, "expected a nats:// URL"),
     rate_limit_per_account_per_minute: z.number().int().min(1),
   }),
 ]);

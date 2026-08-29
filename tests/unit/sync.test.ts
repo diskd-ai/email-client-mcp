@@ -430,7 +430,8 @@ describe("sync/runSyncOnce", () => {
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(3);
   });
 
-  it("notifies app-service only after post-bootstrap forward INBOX messages are stored and checkpointed", async () => {
+  /* REQ-EMAIL-EVENT-012: Forward Inbox locators are emitted only after Drive persistence and checkpointing succeed. */
+  it("notifies MCP Hub only after post-bootstrap forward INBOX messages are stored and checkpointed", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
     const notifyCalls: string[] = [];
     const syncLogs: string[] = [];
