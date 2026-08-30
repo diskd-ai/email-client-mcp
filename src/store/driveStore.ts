@@ -31,6 +31,16 @@ type PatchBatchJsonRpcResult = {
   readonly missing_external_ids?: readonly unknown[];
 };
 
+type UpsertBatchJsonRpcResult = {
+  readonly inserted?: number;
+  readonly updated?: number;
+};
+
+export type InboxCreatedPublication = {
+  readonly type: "exchange.inbox.created";
+  readonly accountId: string;
+};
+
 type IdempotentUploadStartResult = {
   readonly alreadyUploaded?: boolean;
   readonly intentId?: string | null;
@@ -85,6 +95,7 @@ export type DriveStore = {
     folderId: string,
     payloads: readonly StoredEmailPayload[],
     externalIds: readonly string[],
+    publication?: InboxCreatedPublication,
   ) => Promise<Result<DriveError, { inserted: number; updated: number }>>;
   readonly getMessage: (
     mailboxId: string,
@@ -225,6 +236,31 @@ const patchMessagePayloads = async (
   };
 };
 
+/** Call the semantic Drive extension while preserving strict response validation. */
+const upsertMessagesWithInboxPublication = async (
+  mailboxId: string,
+  folderId: string,
+  items: readonly {
+    readonly externalId: string;
+    readonly payload: Readonly<Record<string, unknown>>;
+  }[],
+  publication: InboxCreatedPublication,
+): Promise<{ inserted: number; updated: number }> => {
+  const result = await callDriveJsonRpc<UpsertBatchJsonRpcResult>("messages_store/upsert-batch", {
+    mailbox_id: mailboxId,
+    folder_id: folderId,
+    items: items.map((item) => ({
+      external_id: item.externalId,
+      payload: item.payload,
+    })),
+    publish_inbox_created: { account_id: publication.accountId },
+  });
+  if (typeof result.inserted !== "number" || typeof result.updated !== "number") {
+    throw new Error("messages_store/upsert-batch returned invalid counters");
+  }
+  return { inserted: result.inserted, updated: result.updated };
+};
+
 const uploadAuthHeaders = (): Record<string, string> => {
   const apiKey = process.env.APIS_API_KEY;
   if (apiKey === undefined || apiKey.length === 0) {
@@ -352,17 +388,19 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
     if (r.tag === "Err") return r;
     return Ok({ deletedMessageCount: r.value.deletedMessageCount });
   },
-  async upsertMessages(mailboxId, folderId, payloads, externalIds) {
+  async upsertMessages(mailboxId, folderId, payloads, externalIds, publication) {
     if (payloads.length === 0) return Ok({ inserted: 0, updated: 0 });
     const items = payloads.map((p, i) => ({
       externalId: externalIds[i] as string,
       payload: p as unknown as Readonly<Record<string, unknown>>,
     }));
     const r = await wrap("folder.upsertBatch", () =>
-      folderScoped(store, mailboxId, folderId).upsertBatch({
-        items,
-        autoCommit: false,
-      }),
+      publication === undefined
+        ? folderScoped(store, mailboxId, folderId).upsertBatch({
+            items,
+            autoCommit: false,
+          })
+        : upsertMessagesWithInboxPublication(mailboxId, folderId, items, publication),
     );
     if (r.tag === "Err") return r;
     return Ok({ inserted: r.value.inserted, updated: r.value.updated });

@@ -108,9 +108,8 @@ const buildFakeDeps = (
     readonly listMessageExternalIdsCalls?: string[];
     readonly deleteMessagesCalls?: string[];
     readonly listUidsError?: ImapError;
-    readonly notifyCalls?: string[];
-    readonly notifyError?: Error;
-    readonly syncLogs?: string[];
+    readonly inboxPublicationCalls?: string[];
+    readonly inboxPublicationError?: Error;
     readonly clock?: () => Date;
   },
 ): SyncDeps => {
@@ -162,7 +161,7 @@ const buildFakeDeps = (
         m.delete(folderId);
         return Ok({ deletedMessageCount: deleted });
       },
-      upsertMessages: async (mailboxId, folderId, payloads, externalIds) => {
+      upsertMessages: async (mailboxId, folderId, payloads, externalIds, publication) => {
         upsertCalls += 1;
         options?.upsertMessagesCalls?.push(`${mailboxId}:${folderId}:${payloads.length}`);
         if (
@@ -191,6 +190,17 @@ const buildFakeDeps = (
             inserted += 1;
           }
           f.payloads.set(id, payloads[i] as StoredEmailPayload);
+        }
+        if (publication?.type === "exchange.inbox.created") {
+          options?.inboxPublicationCalls?.push(
+            `${publication.accountId}:${mailboxId}:${folderId}:${externalIds.join(",")}`,
+          );
+          if (options?.inboxPublicationError !== undefined) {
+            return Err({
+              kind: "DriveError",
+              message: options.inboxPublicationError.message,
+            } as AppError);
+          }
         }
         return Ok({ inserted, updated });
       },
@@ -351,21 +361,6 @@ const buildFakeDeps = (
       },
     },
     now: options?.clock ?? (() => new Date("2026-04-29T10:00:00.000Z")),
-    log: options?.syncLogs
-      ? (msg, extra) => {
-          options.syncLogs?.push(`${msg}:${JSON.stringify(extra ?? {})}`);
-        }
-      : undefined,
-    notifier: options?.notifyCalls
-      ? {
-          notifyEmailPersisted: async (event) => {
-            options.notifyCalls?.push(
-              `${event.accountId}:${event.mailboxId}:${event.folderId}:${event.externalId}`,
-            );
-            if (options.notifyError) throw options.notifyError;
-          },
-        }
-      : undefined,
   };
 };
 
@@ -459,11 +454,10 @@ describe("sync/runSyncOnce", () => {
     expect((stored?.metadata as unknown as SyncState).lastSyncedUid).toBe(3);
   });
 
-  /* REQ-EMAIL-EVENT-012: Forward Inbox locators are emitted only after Drive persistence and checkpointing succeed. */
-  it("notifies MCP Hub only after post-bootstrap forward INBOX messages are stored and checkpointed", async () => {
+  /* REQ-3126-005: Forward Inbox locators are published by Drive before the provider checkpoint advances. */
+  it("requests acknowledged Drive publication only for post-bootstrap forward INBOX messages", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
-    const notifyCalls: string[] = [];
-    const syncLogs: string[] = [];
+    const inboxPublicationCalls: string[] = [];
     const imap1: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
       messagesByFolder: new Map([
@@ -472,14 +466,13 @@ describe("sync/runSyncOnce", () => {
     };
 
     const bootstrap = await runSyncOnce(
-      buildFakeDeps(imap1, drive, { notifyCalls, syncLogs }),
+      buildFakeDeps(imap1, drive, { inboxPublicationCalls }),
       acct,
       watcherDefault,
     );
 
     expect(bootstrap.error).toBeNull();
-    expect(notifyCalls).toEqual([]);
-    expect(syncLogs).toEqual([]);
+    expect(inboxPublicationCalls).toEqual([]);
 
     const imap2: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
@@ -496,35 +489,34 @@ describe("sync/runSyncOnce", () => {
     };
 
     const rep = await runSyncOnce(
-      buildFakeDeps(imap2, drive, { notifyCalls, syncLogs }),
+      buildFakeDeps(imap2, drive, { inboxPublicationCalls }),
       acct,
       watcherDefault,
     );
 
     expect(rep.error).toBeNull();
-    expect(notifyCalls).toEqual([
-      "work:exchange-work:INBOX:100:3",
-      "work:exchange-work:INBOX:100:4",
-    ]);
-    expect(syncLogs).toEqual([
-      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:3"}',
-      'signal.notify-ok:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:3"}',
-      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:4"}',
-      'signal.notify-ok:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:4"}',
-    ]);
+    expect(inboxPublicationCalls).toEqual(["work:exchange-work:INBOX:100:3,100:4"]);
     const state = drive.folders.get("exchange-work")?.get("INBOX")
       ?.metadata as unknown as SyncState;
     expect(state.forwardSyncedUid).toBe(4);
   });
 
-  it("does not notify when checkpoint write fails", async () => {
+  /* REQ-3126-012: A confirmed Drive publication precedes the provider checkpoint write. */
+  it("publishes before attempting the provider checkpoint write", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
-    const notifyCalls: string[] = [];
-    const imap: FakeImapState = {
+    const inboxPublicationCalls: string[] = [];
+    const bootstrapImap: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
       messagesByFolder: new Map([["INBOX", { uidValidity: 100, uidNext: 2, msgs: [mkMsg(1)] }]]),
     };
-    const deps = buildFakeDeps(imap, drive, { notifyCalls });
+    await runSyncOnce(buildFakeDeps(bootstrapImap, drive), acct, watcherDefault);
+    const liveImap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 100, uidNext: 3, msgs: [mkMsg(1), mkMsg(2)] }],
+      ]),
+    };
+    const deps = buildFakeDeps(liveImap, drive, { inboxPublicationCalls });
     const originalUpsertFolder = deps.drive.upsertFolder;
     let upsertFolderCalls = 0;
     deps.drive.upsertFolder = async (...args) => {
@@ -541,13 +533,13 @@ describe("sync/runSyncOnce", () => {
     const rep = await runSyncOnce(deps, acct, watcherDefault);
 
     expect(rep.folders[0]?.error).toContain("checkpoint failed");
-    expect(notifyCalls).toEqual([]);
+    expect(inboxPublicationCalls).toEqual(["work:exchange-work:INBOX:100:2"]);
   });
 
-  it("does not fail sync when notification fails", async () => {
+  /* REQ-3126-006: A Drive publication failure leaves the forward checkpoint unchanged for idempotent retry. */
+  it("fails sync and keeps the checkpoint when Drive cannot acknowledge publication", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
-    const notifyCalls: string[] = [];
-    const syncLogs: string[] = [];
+    const inboxPublicationCalls: string[] = [];
     const imap1: FakeImapState = {
       folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
       messagesByFolder: new Map([["INBOX", { uidValidity: 100, uidNext: 2, msgs: [mkMsg(1)] }]]),
@@ -563,26 +555,24 @@ describe("sync/runSyncOnce", () => {
 
     const rep = await runSyncOnce(
       buildFakeDeps(imap2, drive, {
-        notifyCalls,
-        notifyError: new Error("notify down"),
-        syncLogs,
+        inboxPublicationCalls,
+        inboxPublicationError: new Error("JetStream not acknowledged"),
       }),
       acct,
       watcherDefault,
     );
 
-    expect(rep.error).toBeNull();
-    expect(rep.folders[0]?.error).toBeNull();
-    expect(notifyCalls).toEqual(["work:exchange-work:INBOX:100:2"]);
-    expect(syncLogs).toEqual([
-      'signal.notify-start:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:2"}',
-      'signal.notify-err:{"accountId":"work","mailboxId":"exchange-work","folderId":"INBOX","externalId":"100:2","error":"notify down"}',
-    ]);
+    expect(rep.folders[0]?.error).toContain("JetStream not acknowledged");
+    expect(inboxPublicationCalls).toEqual(["work:exchange-work:INBOX:100:2"]);
+    const state = drive.folders.get("exchange-work")?.get("INBOX")
+      ?.metadata as unknown as SyncState;
+    expect(state.forwardSyncedUid).toBe(1);
   });
 
-  it("does not notify for historical backfill or non-INBOX folders", async () => {
+  /* REQ-3126-013: Bootstrap, backfill, and non-Inbox writes never create live Inbox events. */
+  it("does not publish Inbox events for historical backfill or non-INBOX folders", async () => {
     const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
-    const notifyCalls: string[] = [];
+    const inboxPublicationCalls: string[] = [];
     const messages = Array.from({ length: 10 }, (_, i) => mkMsg(i + 1));
     const imap: FakeImapState = {
       folders: [
@@ -603,11 +593,11 @@ describe("sync/runSyncOnce", () => {
       },
     };
 
-    await runSyncOnce(buildFakeDeps(imap, drive, { notifyCalls }), acct, watcher);
-    expect(notifyCalls).toEqual([]);
-    await runSyncOnce(buildFakeDeps(imap, drive, { notifyCalls }), acct, watcher);
+    await runSyncOnce(buildFakeDeps(imap, drive, { inboxPublicationCalls }), acct, watcher);
+    expect(inboxPublicationCalls).toEqual([]);
+    await runSyncOnce(buildFakeDeps(imap, drive, { inboxPublicationCalls }), acct, watcher);
 
-    expect(notifyCalls).toEqual([]);
+    expect(inboxPublicationCalls).toEqual([]);
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- recent-first initial sync indexes latest UID window before historical archive */

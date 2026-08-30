@@ -40,7 +40,6 @@ import type { ImapError } from "./domain/errors.js";
 import { errorMessage } from "./domain/errors.js";
 import { Err, Ok, type Result } from "./domain/result.js";
 import { configureServerMode, parseSubcommand } from "./entrypointMode.js";
-import { buildPlatformEventNotifier } from "./events/platformEventNotifier.js";
 import {
   downloadPartByUid,
   fetchDisplayBodyByUid,
@@ -99,15 +98,10 @@ const main = async (): Promise<void> => {
     name: "email-client-mcp",
     version: PACKAGE_VERSION,
   });
-  const platformEvents = buildPlatformEventNotifier(server, diskd.value.workspaceId);
 
   const pool = buildImapPool(cfg.value.accounts, {
     onEvent: (event) => log("imap.pool-event", event),
   });
-
-  const notifier: SyncDeps["notifier"] = {
-    notifyEmailPersisted: platformEvents.notifyExchangeInboxCreated,
-  };
 
   const syncDeps: SyncDeps = {
     drive: driveStore as unknown as SyncDeps["drive"],
@@ -215,7 +209,6 @@ const main = async (): Promise<void> => {
     },
     now: () => new Date(),
     log,
-    notifier,
   };
 
   const bodyHydrationDeps: BodyHydrationDeps = {

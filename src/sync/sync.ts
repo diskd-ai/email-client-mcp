@@ -67,6 +67,10 @@ export type SyncDeps = {
       folderId: string,
       payloads: readonly StoredEmailPayload[],
       externalIds: readonly string[],
+      publication?: {
+        readonly type: "exchange.inbox.created";
+        readonly accountId: string;
+      },
     ) => Promise<Result<AppError, { inserted: number; updated: number }>>;
     readonly getMessage: (
       mailboxId: string,
@@ -153,14 +157,6 @@ export type SyncDeps = {
   };
   readonly now: () => Date;
   readonly log?: (msg: string, extra?: Readonly<Record<string, unknown>>) => void;
-  readonly notifier?: {
-    readonly notifyEmailPersisted: (event: {
-      readonly accountId: string;
-      readonly mailboxId: string;
-      readonly folderId: string;
-      readonly externalId: string;
-    }) => Promise<void>;
-  };
 };
 
 export type SyncFolderReport = {
@@ -523,26 +519,14 @@ const syncFolder = async (
     rangesToProcess: readonly [number, number][],
     mode: "forward" | "backfill",
     hydrateBodies: boolean,
-    notifyForwardInbox: boolean,
+    publishForwardInbox: boolean,
   ): Promise<SyncFolderReport | null> => {
     for (const [batchFrom, batchTo] of rangesToProcess) {
       let sawMessageInBatch = false;
       let durableUid = mode === "forward" ? batchFrom - 1 : batchTo + 1;
-      const persistedForwardInboxEvents: Array<{
-        readonly accountId: string;
-        readonly mailboxId: string;
-        readonly folderId: string;
-        readonly externalId: string;
-      }> = [];
       const batchPayloads: StoredEmailPayload[] = [];
       const batchExternalIds: string[] = [];
       const batchBodyHydrationCandidates: BodyHydrationRef[] = [];
-      const batchForwardInboxEvents: Array<{
-        readonly accountId: string;
-        readonly mailboxId: string;
-        readonly folderId: string;
-        readonly externalId: string;
-      }> = [];
       try {
         for await (const imapMessage of deps.imap.fetchMetadataRange(
           account.name,
@@ -565,14 +549,6 @@ const syncFolder = async (
 
           batchPayloads.push(payload);
           batchExternalIds.push(externalId);
-          if (notifyForwardInbox && mode === "forward" && folderId === "INBOX") {
-            batchForwardInboxEvents.push({
-              accountId: account.name,
-              mailboxId,
-              folderId,
-              externalId,
-            });
-          }
           if (hydrateBodies && bodyHydrationEnabledForFolder(watcher, folderPath, specialUse)) {
             batchBodyHydrationCandidates.push({
               mailboxId,
@@ -597,6 +573,12 @@ const syncFolder = async (
           folderId,
           batchPayloads,
           batchExternalIds,
+          publishForwardInbox && mode === "forward" && folderId === "INBOX"
+            ? {
+                type: "exchange.inbox.created",
+                accountId: account.name,
+              }
+            : undefined,
         );
         if (upsert.tag === "Err") {
           return await finishWithError(upsert.error);
@@ -606,9 +588,6 @@ const syncFolder = async (
         newMessages += changed;
         if (mode === "forward") {
           forwardMessages += changed;
-          if (changed > 0) {
-            persistedForwardInboxEvents.push(...batchForwardInboxEvents);
-          }
         } else backfilledMessages += changed;
         bodyHydrationCandidates.push(...batchBodyHydrationCandidates);
       }
@@ -651,23 +630,6 @@ const syncFolder = async (
         };
       }
       state = checkpoint;
-
-      if (deps.notifier && persistedForwardInboxEvents.length > 0) {
-        for (const event of persistedForwardInboxEvents) {
-          try {
-            deps.log?.("signal.notify-start", event);
-            await deps.notifier.notifyEmailPersisted(event);
-            deps.log?.("signal.notify-ok", event);
-          } catch (cause) {
-            deps.log?.("signal.notify-err", {
-              ...event,
-              error: cause instanceof Error ? cause.message : String(cause),
-            });
-            // Best-effort post-checkpoint MCP notification. MCP Hub publishes
-            // the deterministic locator event to NATS; duplicate notifications are safe.
-          }
-        }
-      }
     }
     return null;
   };

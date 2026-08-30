@@ -254,6 +254,51 @@ describe("store/buildDriveStore ensureMailbox", () => {
   });
 });
 
+describe("store/buildDriveStore Inbox publication", () => {
+  beforeEach(() => {
+    process.env.APIS_BASE_URL = "https://app.example.test";
+    process.env.APIS_API_KEY = "api-key";
+    process.env.APIS_WORKSPACE_ID = "workspace-1";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /* REQ-3126-007: The provider requests Drive-owned publication in the same persistence call. */
+  it("sends live Inbox publication intent through the Drive JSON-RPC boundary", async () => {
+    const calls: RequestInit[] = [];
+    stubFetch(
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        if (init !== undefined) calls.push(init);
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: 1, result: { inserted: 1, updated: 0 } }),
+          { status: 200 },
+        );
+      }) as typeof fetch,
+    );
+    const store = { mailbox: vi.fn() };
+
+    const result = await buildDriveStore(store as never).upsertMessages(
+      "exchange-work",
+      "INBOX",
+      [{ subject: "private" } as never],
+      ["42:101"],
+      { type: "exchange.inbox.created", accountId: "work" },
+    );
+
+    expect(result).toEqual({ tag: "Ok", value: { inserted: 1, updated: 0 } });
+    expect(JSON.parse(String(calls[0]?.body))).toMatchObject({
+      method: "messages_store/upsert-batch",
+      params: {
+        mailbox_id: "exchange-work",
+        folder_id: "INBOX",
+        publish_inbox_created: { account_id: "work" },
+      },
+    });
+  });
+});
+
 describe("store/buildDriveStore patchMessages", () => {
   beforeEach(() => {
     process.env.APIS_BASE_URL = "https://app.example.test";
