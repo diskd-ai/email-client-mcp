@@ -149,6 +149,23 @@ const main = async (): Promise<void> => {
           } as ImapError);
         }
       },
+      listUids: async (accountId, path) => {
+        const c = await pool.forAccount(accountId);
+        if (c.tag === "Err") return c;
+        try {
+          const found = await withMailboxLock(c.value, path, async () =>
+            c.value.search({ all: true }, { uid: true }),
+          );
+          return Ok(found === false ? [] : found) as Result<ImapError, readonly number[]>;
+        } catch (cause) {
+          return Err({
+            kind: "ImapError",
+            accountId,
+            message: `search UIDs ${path}: ${(cause as Error)?.message ?? String(cause)}`,
+            cause,
+          } as ImapError);
+        }
+      },
       fetchMetadataRange: async function* (accountId, path, fromUid, toUid) {
         const c = await pool.forAccount(accountId);
         if (c.tag === "Err") throw new Error(errorMessage(c.error));

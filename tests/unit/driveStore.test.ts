@@ -320,6 +320,55 @@ describe("store/buildDriveStore patchMessages", () => {
   });
 });
 
+describe("store/buildDriveStore message reconciliation", () => {
+  /* REQ-SYNC-PRUNE-002: Reconciliation reads every Drive message page before comparing provider membership. */
+  it("lists message external IDs across all Drive pages", async () => {
+    const listMessages = vi
+      .fn()
+      .mockResolvedValueOnce({
+        items: [
+          { externalId: "1:3", payload: {}, createdAt: "now", updatedAt: "now" },
+          { externalId: "1:2", payload: {}, createdAt: "now", updatedAt: "now" },
+        ],
+        nextCursor: "cursor-1",
+      })
+      .mockResolvedValueOnce({
+        items: [{ externalId: "1:1", payload: {}, createdAt: "now", updatedAt: "now" }],
+        nextCursor: null,
+      });
+    const folder = { listMessages };
+    const store = {
+      mailbox: vi.fn(() => ({ folder: vi.fn(() => folder) })),
+    };
+
+    const result = await buildDriveStore(store as never).listMessageExternalIds(
+      "exchange-work",
+      "INBOX",
+    );
+
+    expect(result).toEqual({ tag: "Ok", value: ["1:3", "1:2", "1:1"] });
+    expect(listMessages).toHaveBeenNthCalledWith(1, { limit: 1000 });
+    expect(listMessages).toHaveBeenNthCalledWith(2, { limit: 1000, cursor: "cursor-1" });
+  });
+
+  /* REQ-SYNC-PRUNE-003: Reconciliation deletes only explicitly identified stale external IDs. */
+  it("deletes the supplied stale external IDs through the scoped folder", async () => {
+    const deleteBatch = vi.fn(async () => ({ deleted: 2 }));
+    const folder = { deleteBatch };
+    const store = {
+      mailbox: vi.fn(() => ({ folder: vi.fn(() => folder) })),
+    };
+
+    const result = await buildDriveStore(store as never).deleteMessages("exchange-work", "INBOX", [
+      "1:2",
+      "1:4",
+    ]);
+
+    expect(result).toEqual({ tag: "Ok", value: { deleted: 2 } });
+    expect(deleteBatch).toHaveBeenCalledWith({ externalIds: ["1:2", "1:4"] });
+  });
+});
+
 describe("store/buildDriveStore attachment upload", () => {
   beforeEach(() => {
     process.env.APIS_BASE_URL = "https://app.example.test";

@@ -96,6 +96,15 @@ export type DriveStore = {
     folderId: string,
     patches: readonly MessagePayloadPatchInput[],
   ) => Promise<Result<DriveError, { patched: number; missingExternalIds: readonly string[] }>>;
+  readonly listMessageExternalIds: (
+    mailboxId: string,
+    folderId: string,
+  ) => Promise<Result<DriveError, readonly string[]>>;
+  readonly deleteMessages: (
+    mailboxId: string,
+    folderId: string,
+    externalIds: readonly string[],
+  ) => Promise<Result<DriveError, { deleted: number }>>;
   readonly uploadAttachment: (
     mailboxId: string,
     folderId: string,
@@ -377,6 +386,29 @@ export const buildDriveStore = (store: MessagesStore): DriveStore => ({
     );
     if (r.tag === "Err") return r;
     return Ok(r.value);
+  },
+  async listMessageExternalIds(mailboxId, folderId) {
+    return await wrap("folder.listMessages", async () => {
+      const folder = folderScoped(store, mailboxId, folderId);
+      const externalIds: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await folder.listMessages(
+          cursor === undefined ? { limit: 1000 } : { limit: 1000, cursor },
+        );
+        externalIds.push(...page.items.map((item) => item.externalId));
+        cursor = page.nextCursor ?? undefined;
+      } while (cursor !== undefined);
+      return externalIds;
+    });
+  },
+  async deleteMessages(mailboxId, folderId, externalIds) {
+    if (externalIds.length === 0) return Ok({ deleted: 0 });
+    const r = await wrap("folder.deleteBatch", () =>
+      folderScoped(store, mailboxId, folderId).deleteBatch({ externalIds }),
+    );
+    if (r.tag === "Err") return r;
+    return Ok({ deleted: r.value.deleted });
   },
   async uploadAttachment(mailboxId, folderId, externalId, attachment, content) {
     const attachments = attachmentScoped(store, mailboxId, folderId, externalId);

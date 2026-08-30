@@ -104,6 +104,10 @@ const buildFakeDeps = (
     readonly getMessageCalls?: string[];
     readonly upsertMessagesCalls?: string[];
     readonly patchMessagesCalls?: string[];
+    readonly listUidsCalls?: string[];
+    readonly listMessageExternalIdsCalls?: string[];
+    readonly deleteMessagesCalls?: string[];
+    readonly listUidsError?: ImapError;
     readonly notifyCalls?: string[];
     readonly notifyError?: Error;
     readonly syncLogs?: string[];
@@ -220,6 +224,22 @@ const buildFakeDeps = (
         }
         return Ok({ patched, missingExternalIds });
       },
+      listMessageExternalIds: async (mailboxId, folderId) => {
+        options?.listMessageExternalIdsCalls?.push(`${mailboxId}:${folderId}`);
+        const folder = drive.folders.get(mailboxId)?.get(folderId);
+        return Ok(Array.from(folder?.messageIds ?? []));
+      },
+      deleteMessages: async (mailboxId, folderId, externalIds) => {
+        options?.deleteMessagesCalls?.push(`${mailboxId}:${folderId}:${externalIds.join(",")}`);
+        const folder = drive.folders.get(mailboxId)?.get(folderId);
+        if (folder === undefined) return Ok({ deleted: 0 });
+        let deleted = 0;
+        for (const externalId of externalIds) {
+          if (folder.messageIds.delete(externalId)) deleted += 1;
+          folder.payloads.delete(externalId);
+        }
+        return Ok({ deleted });
+      },
       uploadAttachment: async (mailboxId, folderId, externalId, attachment, content) => {
         const mailbox = drive.folders.get(mailboxId);
         const folder = mailbox?.get(folderId);
@@ -281,6 +301,12 @@ const buildFakeDeps = (
           uidNext: f.uidNext,
           messages: f.msgs.length,
         });
+      },
+      listUids: async (_accountId, path) => {
+        options?.listUidsCalls?.push(path);
+        if (options?.listUidsError !== undefined) return Err(options.listUidsError);
+        const folder = imap.messagesByFolder.get(path);
+        return Ok(folder?.msgs.map((message) => message.uid) ?? []);
       },
       fetchMetadataRange: async function* (_acctId, path, fromUid, toUid) {
         options?.fetchMetadataRangeCalls?.push(`${path}:${fromUid}:${toUid}`);
@@ -1166,6 +1192,68 @@ describe("sync/runSyncOnce", () => {
     expect(rep.folders[0]?.reconciledFlags).toBe(1);
     expect(getMessageCalls).toEqual([]);
     expect(drive.folders.get("exchange-work")?.get("INBOX")?.payloads.has("14:94")).toBe(true);
+  });
+
+  /* REQ-SYNC-PRUNE-001: A maintenance tick removes Drive messages that no longer exist in the same IMAP folder. */
+  it("prunes a mirrored message after it moves out of an IMAP folder", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const initialImap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 1, uidNext: 4, msgs: [mkMsg(1), mkMsg(2), mkMsg(3)] }],
+      ]),
+    };
+    await runSyncOnce(buildFakeDeps(initialImap, drive), acct, watcherDefault);
+
+    const movedImap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 1, uidNext: 4, msgs: [mkMsg(1), mkMsg(3)] }],
+      ]),
+    };
+
+    const report = await runSyncOnce(buildFakeDeps(movedImap, drive), acct, watcherDefault);
+
+    expect(report.error).toBeNull();
+    expect(drive.folders.get("exchange-work")?.get("INBOX")?.messageIds).toEqual(
+      new Set(["1:1", "1:3"]),
+    );
+  });
+
+  /* REQ-SYNC-PRUNE-004: A failed provider UID snapshot surfaces an error and never deletes mirrored messages. */
+  it("preserves mirrored messages when provider membership cannot be read", async () => {
+    const drive: FakeDriveState = { mailboxes: new Map(), folders: new Map() };
+    const initialImap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([
+        ["INBOX", { uidValidity: 1, uidNext: 3, msgs: [mkMsg(1), mkMsg(2)] }],
+      ]),
+    };
+    await runSyncOnce(buildFakeDeps(initialImap, drive), acct, watcherDefault);
+
+    const movedImap: FakeImapState = {
+      folders: [{ path: "INBOX", specialUse: "\\Inbox" }],
+      messagesByFolder: new Map([["INBOX", { uidValidity: 1, uidNext: 3, msgs: [mkMsg(1)] }]]),
+    };
+    const deleteMessagesCalls: string[] = [];
+    const report = await runSyncOnce(
+      buildFakeDeps(movedImap, drive, {
+        deleteMessagesCalls,
+        listUidsError: {
+          kind: "ImapError",
+          accountId: "work",
+          message: "provider UID search failed",
+        },
+      }),
+      acct,
+      watcherDefault,
+    );
+
+    expect(report.error).toContain("provider UID search failed");
+    expect(deleteMessagesCalls).toEqual([]);
+    expect(drive.folders.get("exchange-work")?.get("INBOX")?.messageIds).toEqual(
+      new Set(["1:1", "1:2"]),
+    );
   });
 
   /* REQUIREMENT end:comm/email-client-mcp/sync -- folders deleted on IMAP are pruned from drive */

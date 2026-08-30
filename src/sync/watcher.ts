@@ -23,6 +23,7 @@ export type WatcherFolderStatus = {
   readonly forwardMessages: number;
   readonly backfilledMessages: number;
   readonly reconciledFlags: number;
+  readonly prunedMessages: number;
   readonly hydratedBodies: number;
   readonly bodyHydrationErrors: number;
   readonly uidValidityRolled: boolean;
@@ -66,6 +67,7 @@ const reportToStatus = (rep: SyncReport): WatcherAccountStatus => ({
     forwardMessages: f.forwardMessages ?? f.newMessages,
     backfilledMessages: f.backfilledMessages ?? 0,
     reconciledFlags: f.reconciledFlags,
+    prunedMessages: f.prunedMessages,
     hydratedBodies: f.hydratedBodies,
     bodyHydrationErrors: f.bodyHydrationErrors,
     uidValidityRolled: f.uidValidityRolled,
@@ -125,6 +127,7 @@ export const buildWatcher = (
             accountId: acct.name,
             folders: rep.folders.length,
             newMessages: rep.folders.reduce((s, f) => s + f.newMessages, 0),
+            prunedMessages: rep.folders.reduce((s, f) => s + f.prunedMessages, 0),
             hydratedBodies: rep.folders.reduce((s, f) => s + f.hydratedBodies, 0),
             bodyHydrationErrors: rep.folders.reduce((s, f) => s + f.bodyHydrationErrors, 0),
           });

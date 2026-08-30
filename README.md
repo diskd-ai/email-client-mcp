@@ -38,6 +38,7 @@ The watcher synchronizes IMAP into the workspace `messagesStore` on every tick. 
 5. Folder metadata is the durable checkpoint -- restart resumes from there, never from in-memory state.
 6. Folders deleted in IMAP are pruned from Drive at the end of a tick.
 7. Sliding-window flag reconciliation bounds drift to `flag_reconcile_window` UIDs per tick.
+8. One rotating maintenance folder per tick prunes Drive messages that moved or disappeared in IMAP.
 
 Tick interval is clamped to >= 60s.
 

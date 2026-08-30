@@ -14,6 +14,8 @@
  *     except platform-managed folders whose lifecycle is owned by actions.
  *  5. A bounded sliding-window flag reconciliation catches drift on
  *     already-synced UIDs without re-downloading bodies.
+ *  6. One rotating maintenance folder per tick compares complete IMAP
+ *     membership with Drive and removes messages moved or deleted upstream.
  *
  * The function takes injected dependencies (drive store, IMAP client
  * factory, mapper) so unit tests can drive it without real I/O.
@@ -79,6 +81,15 @@ export type SyncDeps = {
         readonly payloadPatch: Readonly<Record<string, unknown>>;
       }[],
     ) => Promise<Result<AppError, { patched: number; missingExternalIds: readonly string[] }>>;
+    readonly listMessageExternalIds: (
+      mailboxId: string,
+      folderId: string,
+    ) => Promise<Result<AppError, readonly string[]>>;
+    readonly deleteMessages: (
+      mailboxId: string,
+      folderId: string,
+      externalIds: readonly string[],
+    ) => Promise<Result<AppError, { deleted: number }>>;
     readonly uploadAttachment: (
       mailboxId: string,
       folderId: string,
@@ -97,6 +108,10 @@ export type SyncDeps = {
       accountId: string,
       path: string,
     ) => Promise<Result<ImapError, { uidValidity: number; uidNext: number; messages: number }>>;
+    readonly listUids: (
+      accountId: string,
+      path: string,
+    ) => Promise<Result<ImapError, readonly number[]>>;
     readonly fetchMetadataRange: (
       accountId: string,
       path: string,
@@ -154,6 +169,7 @@ export type SyncFolderReport = {
   readonly forwardMessages?: number;
   readonly backfilledMessages?: number;
   readonly reconciledFlags: number;
+  readonly prunedMessages: number;
   readonly hydratedBodies: number;
   readonly bodyHydrationErrors: number;
   readonly uidValidityRolled: boolean;
@@ -296,6 +312,19 @@ const shouldPruneDriveFolder = (
 ): boolean =>
   !imapFolderPaths.has(driveFolderId) && !PLATFORM_MANAGED_FOLDER_IDS.has(driveFolderId);
 
+const findStaleExternalIds = (
+  uidValidity: number,
+  providerUids: readonly number[],
+  driveExternalIds: readonly string[],
+): readonly string[] => {
+  const providerExternalIds = new Set(providerUids.map((uid) => externalIdFor(uidValidity, uid)));
+  const currentUidValidityPrefix = `${uidValidity}:`;
+  return driveExternalIds.filter(
+    (externalId) =>
+      externalId.startsWith(currentUidValidityPrefix) && !providerExternalIds.has(externalId),
+  );
+};
+
 /**
  * Sync one folder. Returns the per-folder report; never throws.
  * `lastSyncedUid` is advanced only after each successful batch upsert.
@@ -326,6 +355,7 @@ const syncFolder = async (
   const bodyHydrationCandidates: BodyHydrationRef[] = [];
   let hydratedBodies = 0;
   let bodyHydrationErrors = 0;
+  let prunedMessages = 0;
 
   const statusR = await deps.imap.folderStatus(account.name, folderPath);
   if (statusR.tag === "Err") {
@@ -333,6 +363,7 @@ const syncFolder = async (
       folderId,
       newMessages: 0,
       reconciledFlags: 0,
+      prunedMessages: 0,
       hydratedBodies: 0,
       bodyHydrationErrors: 0,
       uidValidityRolled: false,
@@ -347,6 +378,7 @@ const syncFolder = async (
       folderId,
       newMessages: 0,
       reconciledFlags: 0,
+      prunedMessages: 0,
       hydratedBodies: 0,
       bodyHydrationErrors: 0,
       uidValidityRolled: false,
@@ -368,6 +400,7 @@ const syncFolder = async (
         folderId,
         newMessages: 0,
         reconciledFlags: 0,
+        prunedMessages: 0,
         hydratedBodies: 0,
         bodyHydrationErrors: 0,
         uidValidityRolled,
@@ -410,6 +443,7 @@ const syncFolder = async (
         folderId,
         newMessages: 0,
         reconciledFlags: 0,
+        prunedMessages: 0,
         hydratedBodies: 0,
         bodyHydrationErrors: 0,
         uidValidityRolled,
@@ -432,6 +466,7 @@ const syncFolder = async (
         folderId,
         newMessages: 0,
         reconciledFlags: 0,
+        prunedMessages: 0,
         hydratedBodies: 0,
         bodyHydrationErrors: 0,
         uidValidityRolled,
@@ -456,6 +491,7 @@ const syncFolder = async (
         forwardMessages,
         backfilledMessages,
         reconciledFlags: 0,
+        prunedMessages,
         hydratedBodies,
         bodyHydrationErrors,
         uidValidityRolled,
@@ -472,6 +508,7 @@ const syncFolder = async (
       forwardMessages,
       backfilledMessages,
       reconciledFlags: 0,
+      prunedMessages,
       hydratedBodies,
       bodyHydrationErrors,
       uidValidityRolled,
@@ -603,6 +640,7 @@ const syncFolder = async (
           forwardMessages,
           backfilledMessages,
           reconciledFlags: 0,
+          prunedMessages,
           hydratedBodies,
           bodyHydrationErrors,
           uidValidityRolled,
@@ -741,6 +779,7 @@ const syncFolder = async (
             folderId,
             newMessages,
             reconciledFlags: 0,
+            prunedMessages,
             hydratedBodies,
             bodyHydrationErrors,
             uidValidityRolled,
@@ -769,6 +808,7 @@ const syncFolder = async (
                 folderId,
                 newMessages,
                 reconciledFlags: 0,
+                prunedMessages,
                 hydratedBodies,
                 bodyHydrationErrors,
                 uidValidityRolled,
@@ -787,11 +827,41 @@ const syncFolder = async (
         folderId,
         newMessages,
         reconciledFlags: 0,
+        prunedMessages,
         hydratedBodies,
         bodyHydrationErrors,
         uidValidityRolled,
         error: errorMessage(e),
       };
+    }
+  }
+
+  if (options.runMaintenance) {
+    const providerUids = await deps.imap.listUids(account.name, folderPath);
+    if (providerUids.tag === "Err") return await finishWithError(providerUids.error);
+
+    const driveExternalIds = await deps.drive.listMessageExternalIds(mailboxId, folderId);
+    if (driveExternalIds.tag === "Err") return await finishWithError(driveExternalIds.error);
+
+    const staleExternalIds = findStaleExternalIds(
+      status.uidValidity,
+      providerUids.value,
+      driveExternalIds.value,
+    );
+    for (let offset = 0; offset < staleExternalIds.length; offset += BATCH_SIZE) {
+      const batch = staleExternalIds.slice(offset, offset + BATCH_SIZE);
+      const deleted = await deps.drive.deleteMessages(mailboxId, folderId, batch);
+      if (deleted.tag === "Err") return await finishWithError(deleted.error);
+      prunedMessages += deleted.value.deleted;
+    }
+    if (staleExternalIds.length > 0) {
+      deps.log?.("sync.messages-pruned", {
+        accountId: account.name,
+        mailboxId,
+        folderId,
+        candidates: staleExternalIds.length,
+        deleted: prunedMessages,
+      });
     }
   }
 
@@ -801,6 +871,7 @@ const syncFolder = async (
     forwardMessages,
     backfilledMessages,
     reconciledFlags,
+    prunedMessages,
     hydratedBodies,
     bodyHydrationErrors,
     uidValidityRolled,
@@ -813,7 +884,8 @@ const syncFolder = async (
 
 /**
  * Run one sync tick for one account. Sequentially walks all folders,
- * then prunes Drive folders that no longer exist in IMAP.
+ * reconciles message membership for one rotating folder, then prunes
+ * Drive folders that no longer exist in IMAP.
  */
 export const runSyncOnce = async (
   deps: SyncDeps,
