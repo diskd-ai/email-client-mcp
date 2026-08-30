@@ -34,7 +34,7 @@
     "prepublishOnly": "bun run build && bun run test"
   },
   "dependencies": {
-    "@diskd-ai/sdk": "6.3.5",
+    "@diskd-ai/sdk": "6.5.0",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "imapflow": "^1.2.9",
     "nodemailer": "9.0.6",
