@@ -36,6 +36,7 @@ import {
   systemHydrateEmailBodies,
   systemHydrateEmailBodiesInput,
 } from "./systemHydrateEmailBodies.js";
+import { testConnection, testConnectionInput } from "./testConnection.js";
 
 type ToolResponse = {
   content: Array<{ type: "text"; text: string }>;
@@ -64,6 +65,15 @@ export type ToolDeps = {
 };
 
 export const registerTools = (server: McpServer, deps: ToolDeps): void => {
+  server.registerTool(
+    "test_connection",
+    {
+      description: "Test IMAP and SMTP connectivity for a configured account without sending mail.",
+      inputSchema: testConnectionInput,
+    },
+    async (args) => fromResult(await testConnection(deps.imapPool, deps.accounts, args)),
+  );
+
   server.registerTool(
     "list_accounts",
     {

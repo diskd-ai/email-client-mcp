@@ -1,5 +1,9 @@
 # LOG
 
+## 2026-09-13
+
+- `end:comm/email-client-mcp/tools`: register Vault's `test_connection` probe and report independent live IMAP and SMTP outcomes using the configured account credentials, so a connected System card account can be verified without sending mail (Redmine 2981).
+
 ## 2026-08-29
 
 - `end:comm/email-client-mcp/delivery`: normalize absent Drive-stored email strings at the delivery adapter so canonical Outbox payloads reach SMTP without weakening address, account, or lifecycle validation.
