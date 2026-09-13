@@ -1,4 +1,6 @@
 import { writeFileSync } from "node:fs";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +36,43 @@ function makePool() {
 }
 
 describe("Vault connection probe contract", () => {
+  it("validates Vault's selector through the actual MCP client/server transport", async () => {
+    /* REQ-2981-PROBE-008: tools/list, JSON-RPC input validation, registry dispatch, and result serialization agree on account_name. */
+    const { pool, forAccount } = makePool();
+    const server = new McpServer({ name: "probe-contract", version: "1.0.0" });
+    registerTools(server, { accounts: [account], imapPool: pool } as unknown as ToolDeps);
+    const client = new Client({ name: "vault-contract", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const catalog = await client.listTools();
+      expect(
+        catalog.tools.find((tool) => tool.name === "test_connection")?.inputSchema,
+      ).toMatchObject({ required: ["account_name"], additionalProperties: false });
+      const result = await client.callTool({
+        name: "test_connection",
+        arguments: { account_name: account.name },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result).toMatchObject({
+        content: [{ type: "text", text: expect.stringContaining('"imap"') }],
+      });
+      expect(forAccount).toHaveBeenCalledWith(account.name);
+      for (const args of [
+        { account: account.name },
+        { account_name: account.name, password: "override" },
+      ]) {
+        const invalid = await client.callTool({ name: "test_connection", arguments: args });
+        expect(invalid.isError).toBe(true);
+      }
+      expect(forAccount).toHaveBeenCalledTimes(1);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     verify.mockResolvedValue(true);
