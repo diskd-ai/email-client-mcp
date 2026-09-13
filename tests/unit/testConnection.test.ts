@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -67,6 +68,8 @@ describe("Vault connection probe contract", () => {
     if (!call) throw new Error("Connection tool missing");
     const result = await call[2]({ account_name: account.name }, {} as never);
     expect(result.isError).not.toBe(true);
+    const output = process.env.EMAIL_PROBE_CONTRACT_OUTPUT;
+    if (output) writeFileSync(output, JSON.stringify(result, null, 2) + "\n");
     const text = result.content.find((item) => item.type === "text");
     if (!text || text.type !== "text") throw new Error("Missing text result");
     expect(JSON.parse(text.text)).toEqual({
